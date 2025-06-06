@@ -1,42 +1,44 @@
 [package]
-name = "cursor-rust-tools"
+name = "rust-devtools-mcp"
 version = "0.1.0"
 edition = "2024"
 
 [[bin]]
-name = "cursor-rust-tools"
+name = "rust-devtools-mcp"
 path = "src/main.rs"
 
 [dependencies]
-anyhow = "1.0.97"
-async-lsp = "0.2.2"
-async-process = "2.3.0"
-flume = "0.11.1"
-futures = "0.3.31"
+anyhow = "1.0"
+async-lsp = "0.2"
+async-process = "2.3"
+flume = "0.11"
+# Using 0.95.1 because newer versions switched to fluent_uri which has interoperability issues
+# See: https://github.com/gluon-lang/lsp-types/issues/284
+# - Lacks conversion methods between Uri types
+# - Missing file path handling utilities
+# - No join functionality for URIs
 lsp-types = "0.95.1"
-mcp-core = { git = "https://github.com/terhechte/mcp-core", branch = "allow-tool-context", features = ["sse"]}
-serde = { version = "1.0.219", features = ["derive"] }
-serde_json = "1.0.140"
+axum = "0.8"
+rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk", rev = "a66f66a", features = [
+    "server",
+    "transport-sse-server",
+    "transport-io",
+    "transport-streamable-http-server",
+    "macros",
+    "schemars",
+] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 tokio = { version = "1.44", features = ["full"] }
-tower = "0.5.2"
-tracing = "0.1.41"
-tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
-url = "2.5.4"
-schemars = "0.8.22"
-fuzzt = "0.3.1"
-regex = "1.11.1"
-glob = "0.3.2"
-toml = "0.8.20"
-sha2 = "0.10.8"
-ignore = "0.4.23"
-html2md = "0.2.15"
-egui = "0.31"
-eframe = "0.31"
-lazy_static = "1.5.0"
-egui-aesthetix = { git = "https://github.com/thebashpotato/egui-aesthetix", features = ["all_themes"]}
-rfd = "0.15.3"
-open = "5"
-shellexpand = "3.1.0"
-chrono = "0.4.40"
-notify = "8.0.0"
-notify-debouncer-mini = "0.6.0"
+tower = "0.5"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = "2.5"
+fuzzt = "0.3"
+regex = "1.11"
+glob = "0.3"
+toml = "0.8"
+ignore = "0.4"
+html2md = "0.2"
+shellexpand = "3.1"
+notify-debouncer-mini = "0.6"

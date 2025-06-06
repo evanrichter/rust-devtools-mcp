@@ -1,0 +1,93 @@
+# Rust DevTools MCP Server
+
+[English Version / 英文版本](README.md)
+
+一个为 Cursor 编辑器提供 Rust 开发工具的 MCP (Model Context Protocol) 服务器。
+
+## 项目说明
+
+本项目 fork 自 [terhechte/cursor-rust-tools](https://github.com/terhechte/cursor-rust-tools.git)，并进行了以下改进：
+
+- **移除 GUI 功能**：专注于命令行模式，简化部署和使用
+- **升级依赖**：更新到最新版本的依赖库，提升性能和稳定性
+- **使用官方 MCP 实现**：替换为 MCP 官方的 `rmcp` Rust SDK，确保协议兼容性
+
+## 功能特性
+
+### LSP 集成
+- 获取符号的悬停信息（类型、描述）
+- 查找符号的所有引用
+- 获取符号的实现代码
+- 按名称查找类型并返回悬停信息
+
+### 文档生成
+- 获取 crate 或特定符号的文档（如 `tokio` 或 `tokio::spawn`）
+- 本地生成和缓存 Rust 文档
+- 将 HTML 文档转换为 Markdown 格式
+
+### Cargo 命令
+- 执行 `cargo test` 并获取输出
+- 执行 `cargo check` 并获取输出
+- 其他 Cargo 相关操作
+
+## 安装
+
+```bash
+cargo install --git https://github.com/cupnfish/rust-devtools-mcp
+```
+
+## 使用
+
+### 命令行模式
+
+```bash
+rust-devtools-mcp --no-ui
+```
+
+### 配置文件
+
+在 `~/.rust-devtools-mcp` 中配置项目：
+
+```toml
+[[projects]]
+root = "/path/to/your/rust/project1"
+ignore_crates = []
+
+[[projects]]
+root = "/path/to/your/rust/project2"
+ignore_crates = ["large-crate-name"]
+```
+
+`ignore_crates` 是一个可选的 crate 依赖名称列表，用于排除不需要索引文档的大型依赖。
+
+### Cursor 配置
+
+1. 在项目根目录创建 `.cursor/mcp.json` 文件
+2. Cursor 会自动检测并询问是否启用新的 MCP 服务器
+3. 在 Cursor 设置中的 MCP 部分检查服务器状态
+4. 在聊天中选择 Agent 模式，然后可以要求使用相关工具
+
+## 架构
+
+项目采用模块化设计：
+
+- `src/main.rs` - 主入口点，处理服务器启动和通知
+- `src/context.rs` - 全局上下文管理，项目配置和状态
+- `src/lsp/` - Rust Analyzer LSP 集成
+- `src/docs/` - 文档生成和索引
+- `src/mcp/` - MCP 服务器实现
+- `src/project.rs` - 项目抽象和管理
+
+## 工作原理
+
+- **LSP 功能**：启动独立的 Rust Analyzer 实例来索引代码库
+- **文档功能**：运行 `cargo doc` 并将 HTML 文档解析为本地 Markdown
+- **缓存机制**：文档信息存储在项目根目录的 `.docs-cache` 文件夹中
+
+## 作者
+
+cupnfish
+
+## 许可证
+
+继承原项目许可证。

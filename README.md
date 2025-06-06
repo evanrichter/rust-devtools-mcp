@@ -1,99 +1,93 @@
-<img src="media/icon.png" width="150" height="149" />
+# Rust DevTools MCP Server
 
+[中文版本 / Chinese Version](README_CN.md)
 
-# Cursor Rust Tools
+A MCP (Model Context Protocol) server that provides Rust development tools for Cursor editor.
 
-A [MCP](https://www.anthropic.com/news/model-context-protocol) server to allow the LLM in Cursor to 
-access Rust Analyzer, Crate Docs and Cargo Commands.
+## Project Description
 
-Includes an UI for configuration.
+This project is forked from [terhechte/cursor-rust-tools](https://github.com/terhechte/cursor-rust-tools.git) with the following improvements:
 
-![media/example.png](media/example.png)
+- **Removed GUI functionality**: Focus on command-line mode for simplified deployment and usage
+- **Upgraded dependencies**: Updated to latest versions of dependency libraries for improved performance and stability
+- **Official MCP implementation**: Replaced with official MCP `rmcp` Rust SDK to ensure protocol compatibility
 
-## What it does
+## Features
 
-Currently, various AI agents don't offer the AI the ability to access Rust type information from the LSP.
-This is a hurdle because instead of seeing the type, the LLM has to reason about the potential type.
+### LSP Integration
+- Get hover information for symbols (type, description)
+- Find all references of a symbol
+- Get implementation code of a symbol
+- Find types by name and return hover information
 
-In addition, the only information about the dependencies (say `tokio`) are what they were trained on which is
-out of date and potentially for a different version. This can lead to all kinds of issues.
+### Documentation Generation
+- Get documentation for crates or specific symbols (e.g., `tokio` or `tokio::spawn`)
+- Generate and cache Rust documentation locally
+- Convert HTML documentation to Markdown format
 
-`Cursor Rust Tools` makes these available over the Model Context Protocol (`MCP`).
-
-- Get the documentation for a `crate` or for a specific symbol in the `crate` (e.g. `tokio` or `tokio::spawn`)
-- Get the hover information (type, description) for a specific symbol in a file
-- Get a list of all the references for a specific symbol in a file
-- Get the implementation of a symbol in a file (retrieves the whole file that contains the implementation)
-- Find a type just by name in a file the project and return the hover information
-- Get the output of `cargo test`
-- Get the output of `cargo check`
-
-![media/screenshot.png](media/screenshot.png)
-
-## How it works
-
-For the LSP functionality `src/lsp` it spins up a new Rust Analyzer that indexes your codebase just like the on running in your editor. We can't query the one running in the editor because Rust Analyzer is bound to be used by a single consumer (e.g. the `open document` action requires a `close document` in the right order, etc)
-
-For documentation, it will run `cargo docs` and then parse the html documentation into markdown locally.
-This information is stored in the project root in the `.docs-cache` folder.
+### Cargo Commands
+- Execute `cargo test` and get output
+- Execute `cargo check` and get output
+- Other Cargo-related operations
 
 ## Installation
 
-```sh
-cargo install --git https://github.com/terhechte/cursor-rust-tools
+```bash
+cargo install --git https://github.com/cupnfish/rust-devtools-mcp
 ```
 
-### Run With UI
+## Usage
 
-``` sh
-cursor-rust-tools
+### Command Line Mode
+
+```bash
+rust-devtools-mcp --no-ui
 ```
 
-This will bring up a UI in which you can add projects, install the `mcp.json` and see the activity.
+### Configuration File
 
-### Run Without UI
+Configure projects in `~/.rust-devtools-mcp`:
 
-Alternatively, once you have a `~/.cursor-rust-tools` set up with projects, you can also just run it via
-
-``` sh
-cursor-rust-tools --no-ui
-```
-
-## Configuration
-
-In stead of using the UI to create a configuration, you can also set up `~/.cursor-rust-tools` yourself:
-
-``` toml
+```toml
 [[projects]]
-root = "/Users/terhechte/Developer/Rust/example1"
+root = "/path/to/your/rust/project1"
 ignore_crates = []
 
 [[projects]]
-root = "/Users/terhechte/Developer/Rust/example2"
-ignore_crates = []
+root = "/path/to/your/rust/project2"
+ignore_crates = ["large-crate-name"]
 ```
 
-`ignore_crates` is a list of crate dependency names that you don't want to be indexed for documentation. For example because they're too big.
+`ignore_crates` is an optional list of crate dependency names to exclude from documentation indexing for large dependencies.
 
-## Configuring Cursor
+### Cursor Configuration
 
-One the app is running, you can configure Cursor to use it. This requires multiple steps.
+1. Create `.cursor/mcp.json` file in your project root
+2. Cursor will automatically detect and ask whether to enable the new MCP server
+3. Check server status in Cursor settings under MCP section
+4. Select Agent mode in chat, then you can request to use related tools
 
-1. Add a `project-dir/.cursor/mcp.json` to your project. The `Cursor Rust Tools` UI has a button to do that for you. Running it without UI will also show you the `mcp.json` contents in the terminal.
-2. As soon as you save that file, Cursor will detect that a new MCP server has been added and ask you to enable it. (in a dialog in the bottom right).
-3. You can check the Cursor settings (under `MCP`) to see where it is working correctly
-4. To test, make sure you have `Agent Mode` selected in the current `Chat`. And then you can ask it to utilize one of the new tools, for example the `cargo_check` tool.
-5. [You might want to add cursor rules to tell the LLM to prefer using these tools whenever possible. I'm still experimenting with this.](https://docs.cursor.com/context/rules-for-ai)
+## Architecture
 
-![media/cursor.png](media/cursor.png)
+The project uses a modular design:
 
-**The contents of all the `mcp.json` is the same. Cursor Rust Tools figures out the correct project via
-the filepath**
+- `src/main.rs` - Main entry point, handles server startup and notifications
+- `src/context.rs` - Global context management, project configuration and state
+- `src/lsp/` - Rust Analyzer LSP integration
+- `src/docs/` - Documentation generation and indexing
+- `src/mcp/` - MCP server implementation
+- `src/project.rs` - Project abstraction and management
 
-## Open Todos
+## How It Works
 
-- [ ] Create a [Zed](https://zed.dev) extension to allow using this
-- [ ] Proper shutdown without errors
-- [ ] Removing a project is a bit frail right now (in the UI)
-- [ ] Expose more LSP commands
-- [ ] Allow the LLM to perform [Grit operations](https://docs.grit.io/patterns#Miscellaneous)
+- **LSP functionality**: Starts an independent Rust Analyzer instance to index the codebase
+- **Documentation functionality**: Runs `cargo doc` and parses HTML documentation into local Markdown
+- **Caching mechanism**: Documentation information is stored in the `.docs-cache` folder in the project root
+
+## Author
+
+cupnfish
+
+## License
+
+Inherits the license from the original project.

@@ -9,7 +9,6 @@ use crate::cargo_remote::CargoRemote;
 use crate::docs::{Docs, DocsNotification};
 use crate::lsp::LspNotification;
 use crate::mcp::McpNotification;
-use crate::ui::ProjectDescription;
 use crate::{
     lsp::RustAnalyzerLsp,
     project::{Project, TransportType},
@@ -17,6 +16,14 @@ use crate::{
 use anyhow::Result;
 use flume::Sender;
 use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectDescription {
+    pub root: PathBuf,
+    pub name: String,
+    pub is_indexing_lsp: bool,
+    pub is_indexing_docs: bool,
+}
 
 #[derive(Debug, Clone)]
 pub enum ContextNotification {
@@ -154,6 +161,7 @@ impl Context {
         match &self.transport {
             TransportType::Stdio => ("stdio".to_string(), 0),
             TransportType::Sse { host, port } => (host.clone(), *port),
+            TransportType::StreamableHttp { host, port } => (host.clone(), *port),
         }
     }
 
@@ -178,7 +186,7 @@ impl Context {
     }
 
     pub async fn send_mcp_notification(&self, notification: McpNotification) -> Result<()> {
-        self.mcp_sender.send(notification)?;
+        self.mcp_sender.send_async(notification).await?;
         Ok(())
     }
 

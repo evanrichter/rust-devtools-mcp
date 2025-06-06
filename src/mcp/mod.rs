@@ -1,10 +1,4 @@
-mod cargo_check;
-mod cargo_test;
-mod crate_docs;
-mod symbol_docs;
-mod symbol_impl;
-mod symbol_references;
-mod symbol_resolve;
+mod server;
 mod utils;
 
 use std::path::PathBuf;
@@ -12,71 +6,54 @@ use std::path::PathBuf;
 use crate::context::Context;
 use crate::project::TransportType;
 use anyhow::Result;
-use mcp_core::{
-    server::Server,
-    transport::{ServerSseTransport, ServerStdioTransport},
-    types::{CallToolRequest, CallToolResponse, ServerCapabilities},
-};
-use serde_json::json;
+use rmcp::model::{CallToolRequestParam, CallToolResult};
+use rmcp::{ServiceExt, transport::SseServer, transport::stdio, transport::streamable_http_server};
+use server::DevToolsServer;
 
 #[derive(Debug, Clone)]
 pub(super) enum McpNotification {
     Request {
-        content: CallToolRequest,
+        content: CallToolRequestParam,
         project: PathBuf,
     },
     Response {
-        content: CallToolResponse,
+        content: CallToolResult,
         project: PathBuf,
     },
 }
 
 pub async fn run_server(context: Context) -> Result<()> {
-    let server_protocol = Server::builder("cursor_rust_tools".to_string(), "1.0".to_string())
-        .capabilities(ServerCapabilities {
-            tools: Some(json!({
-                "listChanged": false,
-            })),
-            ..Default::default()
-        })
-        .register_tool(
-            symbol_docs::SymbolDocs::tool(),
-            symbol_docs::SymbolDocs::call(context.clone()),
-        )
-        .register_tool(
-            symbol_impl::SymbolImpl::tool(),
-            symbol_impl::SymbolImpl::call(context.clone()),
-        )
-        .register_tool(
-            symbol_references::SymbolReferences::tool(),
-            symbol_references::SymbolReferences::call(context.clone()),
-        )
-        .register_tool(
-            symbol_resolve::SymbolResolve::tool(),
-            symbol_resolve::SymbolResolve::call(context.clone()),
-        )
-        .register_tool(
-            crate_docs::CrateDocs::tool(),
-            crate_docs::CrateDocs::call(context.clone()),
-        )
-        .register_tool(
-            cargo_check::CargoCheck::tool(),
-            cargo_check::CargoCheck::call(context.clone()),
-        )
-        .register_tool(
-            cargo_test::CargoTest::tool(),
-            cargo_test::CargoTest::call(context.clone()),
-        )
-        .build();
+    let dev_tools_server = DevToolsServer::new(context.clone());
 
     match context.transport() {
         TransportType::Stdio => {
-            let transport = ServerStdioTransport::new(server_protocol);
-            Server::start(transport).await
+            let service = dev_tools_server.serve(stdio()).await?;
+            service.waiting().await?;
         }
         TransportType::Sse { host, port } => {
-            let transport = ServerSseTransport::new(host.to_string(), *port, server_protocol);
-            Server::start(transport).await
+            let addr = format!("{}:{}", host, port).parse()?;
+            let sse_server = SseServer::serve(addr).await?;
+            // with_service takes a factory, so we clone context for each new connection
+            let cancel_token =
+                sse_server.with_service(move || DevToolsServer::new(context.clone()));
+            cancel_token.cancelled().await;
+        }
+        TransportType::StreamableHttp { host, port } => {
+            use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
+            let addr = format!("{}:{}", host, port);
+            
+            let service = streamable_http_server::StreamableHttpService::new(
+                move || DevToolsServer::new(context.clone()),
+                LocalSessionManager::default().into(),
+                Default::default(),
+            );
+            
+            let router = axum::Router::new().nest_service("/mcp", service);
+            let tcp_listener = tokio::net::TcpListener::bind(&addr).await?;
+            let _ = axum::serve(tcp_listener, router)
+                .with_graceful_shutdown(async { tokio::signal::ctrl_c().await.unwrap() })
+                .await;
         }
     }
+    Ok(())
 }

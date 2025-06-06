@@ -4,58 +4,44 @@ use std::sync::Arc;
 use crate::context::{Context, ProjectContext};
 use anyhow::Result;
 use lsp_types::Position;
-use mcp_core::types::{CallToolRequest, CallToolResponse, ToolResponseContent};
+use rmcp::model::{CallToolRequestParam, CallToolResult, Content};
 
-pub fn error_response(message: &str) -> CallToolResponse {
-    CallToolResponse {
-        content: vec![ToolResponseContent::Text {
-            text: message.to_string(),
-        }],
-        is_error: Some(true),
-        meta: None,
-    }
+pub fn error_response_v2(message: &str) -> CallToolResult {
+    CallToolResult::error(vec![Content::text(message.to_string())])
 }
 
 pub(super) trait RequestExtension {
-    fn get_line(&self) -> Result<u64, CallToolResponse>;
-    fn get_symbol(&self) -> Result<String, CallToolResponse>;
-    fn get_file(&self) -> Result<String, CallToolResponse>;
+    fn get_line(&self) -> Result<u64, rmcp::Error>;
+    fn get_symbol(&self) -> Result<String, rmcp::Error>;
+    fn get_file(&self) -> Result<String, rmcp::Error>;
 }
 
-impl RequestExtension for CallToolRequest {
-    fn get_line(&self) -> Result<u64, CallToolResponse> {
+impl RequestExtension for CallToolRequestParam {
+    fn get_line(&self) -> Result<u64, rmcp::Error> {
         let number = self
             .arguments
             .as_ref()
             .and_then(|args| args.get("line"))
             .and_then(|v| v.as_u64())
-            .ok_or_else(|| error_response("Line is required"))?;
-        // I'm not sure about this. Cursor just now used 0 based indexing
-        // Cursor gives llm's line numbers as 1-based, but the LSP uses 0-based
+            .ok_or_else(|| rmcp::Error::invalid_params("Line is required", None))?;
         Ok(number)
-        // if number == 0 {
-        // return Err(error_response(
-        // "Line number must be greater than 0 as line numbers are 1 based",
-        // ));
-        // }
-        // Ok(number - 1)
     }
 
-    fn get_symbol(&self) -> Result<String, CallToolResponse> {
+    fn get_symbol(&self) -> Result<String, rmcp::Error> {
         self.arguments
             .as_ref()
             .and_then(|args| args.get("symbol"))
             .and_then(|v| v.as_str())
-            .ok_or_else(|| error_response("Symbol is required"))
+            .ok_or_else(|| rmcp::Error::invalid_params("Symbol is required", None))
             .map(|s| s.to_string())
     }
 
-    fn get_file(&self) -> Result<String, CallToolResponse> {
+    fn get_file(&self) -> Result<String, rmcp::Error> {
         self.arguments
             .as_ref()
             .and_then(|args| args.get("file"))
             .and_then(|v| v.as_str())
-            .ok_or_else(|| error_response("File is required"))
+            .ok_or_else(|| rmcp::Error::invalid_params("File is required", None))
             .map(|s| s.to_string())
     }
 }
@@ -63,18 +49,17 @@ impl RequestExtension for CallToolRequest {
 /// Returns the project, the relative file path and the absolute file path
 pub async fn get_info_from_request(
     context: &Context,
-    request: &CallToolRequest,
-) -> Result<(Arc<ProjectContext>, String, PathBuf), CallToolResponse> {
-    let file = request.get_file()?;
-    let absolute_path = PathBuf::from(file.clone());
+    file_path: &str,
+) -> Result<(Arc<ProjectContext>, String, PathBuf), String> {
+    let absolute_path = PathBuf::from(file_path);
     let Some(project) = context.get_project_by_path(&absolute_path).await else {
-        return Err(error_response("No project found for file {file}"));
+        return Err(format!("No project found for file {}", file_path));
     };
 
     let relative_path = project
         .project
-        .relative_path(&file)
-        .map_err(|e| error_response(&e))?;
+        .relative_path(file_path)
+        .map_err(|e| e.to_string())?;
 
     Ok((project, relative_path, absolute_path))
 }
@@ -90,9 +75,9 @@ pub async fn find_symbol_position_in_file(
         Ok(None) => return Err("No symbols found".to_string()),
         Err(e) => return Err(e.to_string()),
     };
-    for symbol in symbols {
-        if symbol.location.range.start.line == line as u32 {
-            return Ok(symbol.location.range.start);
+    for s in symbols {
+        if s.name == symbol && s.location.range.start.line == line as u32 {
+            return Ok(s.location.range.start);
         }
     }
     Err(format!("Symbol {symbol} not found in file {relative_file}"))

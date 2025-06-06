@@ -7,6 +7,7 @@ use url::Url;
 pub enum TransportType {
     Stdio,
     Sse { host: String, port: u16 },
+    StreamableHttp { host: String, port: u16 },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -4,9 +4,6 @@ mod docs;
 mod lsp;
 mod mcp;
 mod project;
-mod ui;
-
-use std::env::args;
 
 use anyhow::Result;
 use context::Context as ContextType;
@@ -16,7 +13,6 @@ use tracing::{error, info};
 use tracing_subscriber::{
     EnvFilter, Layer, fmt::format::PrettyFields, layer::SubscriberExt, util::SubscriberInitExt,
 };
-use ui::run_ui;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -33,8 +29,6 @@ async fn main() -> Result<()> {
         .with(log_layer)
         .init();
 
-    let no_ui = args().any(|arg| arg == "--no-ui");
-
     let (sender, receiver) = flume::unbounded();
     let context = ContextType::new(4000, sender).await;
     context.load_config().await?;
@@ -48,36 +42,56 @@ async fn main() -> Result<()> {
     });
 
     let main_loop_fut = async {
-        if no_ui {
-            info!(
-                "Running in CLI mode on port {}:{}",
-                context.address_information().0,
-                context.address_information().1
-            );
-            info!("Configuration file: {}", context.configuration_file());
-            if context.project_descriptions().await.is_empty() {
-                error!(
-                    "No projects found, please run without `--no-ui` or edit configuration file"
-                );
-                return Ok(()); // Early return for no projects in CLI mode
-            }
-            info!(
-                "Cursor mcp json (project/.cursor.mcp.json):\n```json\n{}\n```",
-                context.mcp_configuration()
-            );
-            // Keep the CLI mode running indefinitely until Ctrl+C
-            loop {
-                while let Ok(notification) = receiver.try_recv() {
-                    info!("  {}", notification.description());
+        info!(
+            "Running in CLI mode on port {}:{}",
+            context.address_information().0,
+            context.address_information().1
+        );
+        info!("Configuration file: {}", context.configuration_file());
+        if context.project_descriptions().await.is_empty() {
+            error!("No projects found, please edit configuration file");
+            return Ok::<(), anyhow::Error>(()); // Early return for no projects in CLI mode
+        }
+        info!(
+            "Cursor mcp json (project/.cursor.mcp.json):\n```json\n{}\n```",
+            context.mcp_configuration()
+        );
+        
+        // Request project descriptions to populate notifications
+        context.request_project_descriptions();
+        // Keep the CLI mode running indefinitely until Ctrl+C
+        loop {
+            while let Ok(notification) = receiver.try_recv() {
+                let notification_path = notification.notification_path();
+                info!("[{}] {}", notification_path.display(), notification.description());
+                
+                // Handle specific notification types
+                match &notification {
+                    context::ContextNotification::ProjectDescriptions(descriptions) => {
+                        info!("Received project descriptions: {} projects", descriptions.len());
+                        for desc in descriptions {
+                            info!("  - {}: {}", desc.name, desc.root.display());
+                        }
+                    }
+                    context::ContextNotification::ProjectAdded(path) => {
+                        info!("Project added: {}", path.display());
+                    }
+                    context::ContextNotification::ProjectRemoved(path) => {
+                        info!("Project removed: {}", path.display());
+                    }
+                    context::ContextNotification::Lsp(_lsp_notif) => {
+                        info!("LSP notification for project: {}", notification_path.display());
+                    }
+                    context::ContextNotification::Docs(_docs_notif) => {
+                        info!("Docs notification for project: {}", notification_path.display());
+                    }
+                    context::ContextNotification::Mcp(_mcp_notif) => {
+                        info!("MCP notification for project: {}", notification_path.display());
+                    }
                 }
-                // Add a small sleep to avoid busy-waiting if desired, or just rely on Ctrl+C
-                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
             }
-            // Note: This loop will now only exit via Ctrl+C handled by tokio::select!
-        } else {
-            let project_descriptions = context.project_descriptions().await;
-            // run_ui blocks, so we need to handle its potential error
-            run_ui(context, receiver, project_descriptions)
+            // Add a small sleep to avoid busy-waiting if desired, or just rely on Ctrl+C
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         }
     };
 
@@ -97,9 +111,7 @@ async fn main() -> Result<()> {
         }
     }
 
-    if no_ui {
-        final_context.shutdown_all().await;
-    }
+    final_context.shutdown_all().await;
 
     Ok(())
 }
