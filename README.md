@@ -30,6 +30,11 @@ This project is forked from [terhechte/cursor-rust-tools](https://github.com/ter
 - Execute `cargo check` and get output
 - Other Cargo-related operations
 
+### Project Management
+- Add/remove projects from workspace
+- List active projects and their status
+- Force reindexing of documentation
+
 ## Installation
 
 ```bash
@@ -41,12 +46,12 @@ cargo install --git https://github.com/cupnfish/rust-devtools-mcp
 ### Command Line Mode
 
 ```bash
-rust-devtools-mcp --no-ui
+rust-devtools-mcp
 ```
 
 ### Configuration File
 
-Configure projects in `~/.rust-devtools-mcp`:
+Configure projects in `~/.cursor-rust-tools`:
 
 ```toml
 [[projects]]
@@ -62,10 +67,11 @@ ignore_crates = ["large-crate-name"]
 
 ### Cursor Configuration
 
-1. Create `.cursor/mcp.json` file in your project root
-2. Cursor will automatically detect and ask whether to enable the new MCP server
-3. Check server status in Cursor settings under MCP section
-4. Select Agent mode in chat, then you can request to use related tools
+1. The server will print its MCP configuration when started
+2. Create `.cursor.mcp.json` file in your project root using the provided configuration
+3. Cursor will automatically detect and enable the MCP server
+4. Check server status in Cursor settings under MCP section
+5. Select Agent mode in chat to access development tools
 
 ## Architecture
 
@@ -73,6 +79,7 @@ The project uses a modular design:
 
 - `src/main.rs` - Main entry point, handles server startup and notifications
 - `src/context.rs` - Global context management, project configuration and state
+- `src/cargo_remote.rs` - Cargo command execution and output parsing
 - `src/lsp/` - Rust Analyzer LSP integration
 - `src/docs/` - Documentation generation and indexing
 - `src/mcp/` - MCP server implementation
@@ -83,6 +90,8 @@ The project uses a modular design:
 - **LSP functionality**: Starts an independent Rust Analyzer instance to index the codebase
 - **Documentation functionality**: Runs `cargo doc` and parses HTML documentation into local Markdown
 - **Caching mechanism**: Documentation information is stored in the `.docs-cache` folder in the project root
+- **Project management**: Projects are tracked in `~/.cursor-rust-tools` configuration file
+- **Notification system**: Provides real-time updates on indexing status and tool usage
 
 ## Author
 

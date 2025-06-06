@@ -30,6 +30,11 @@
 - 执行 `cargo check` 并获取输出
 - 其他 Cargo 相关操作
 
+### 项目管理
+- 向工作区添加/移除项目
+- 列出活动项目及其状态
+- 强制重新索引文档
+
 ## 安装
 
 ```bash
@@ -41,12 +46,12 @@ cargo install --git https://github.com/cupnfish/rust-devtools-mcp
 ### 命令行模式
 
 ```bash
-rust-devtools-mcp --no-ui
+rust-devtools-mcp
 ```
 
 ### 配置文件
 
-在 `~/.rust-devtools-mcp` 中配置项目：
+在 `~/.cursor-rust-tools` 中配置项目：
 
 ```toml
 [[projects]]
@@ -62,10 +67,11 @@ ignore_crates = ["large-crate-name"]
 
 ### Cursor 配置
 
-1. 在项目根目录创建 `.cursor/mcp.json` 文件
-2. Cursor 会自动检测并询问是否启用新的 MCP 服务器
-3. 在 Cursor 设置中的 MCP 部分检查服务器状态
-4. 在聊天中选择 Agent 模式，然后可以要求使用相关工具
+1. 服务器启动时会打印其 MCP 配置
+2. 使用提供的配置在项目根目录创建 `.cursor.mcp.json` 文件
+3. Cursor 会自动检测并启用 MCP 服务器
+4. 在 Cursor 设置的 MCP 部分检查服务器状态
+5. 在聊天中选择 Agent 模式以访问开发工具
 
 ## 架构
 
@@ -73,6 +79,7 @@ ignore_crates = ["large-crate-name"]
 
 - `src/main.rs` - 主入口点，处理服务器启动和通知
 - `src/context.rs` - 全局上下文管理，项目配置和状态
+- `src/cargo_remote.rs` - Cargo 命令执行和输出解析
 - `src/lsp/` - Rust Analyzer LSP 集成
 - `src/docs/` - 文档生成和索引
 - `src/mcp/` - MCP 服务器实现
@@ -83,6 +90,8 @@ ignore_crates = ["large-crate-name"]
 - **LSP 功能**：启动独立的 Rust Analyzer 实例来索引代码库
 - **文档功能**：运行 `cargo doc` 并将 HTML 文档解析为本地 Markdown
 - **缓存机制**：文档信息存储在项目根目录的 `.docs-cache` 文件夹中
+- **项目管理**：项目信息跟踪存储在 `~/.cursor-rust-tools` 配置文件中
+- **通知系统**：提供关于索引状态和工具使用的实时更新
 
 ## 作者
 
