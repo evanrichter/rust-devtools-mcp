@@ -97,12 +97,14 @@ enum ProjectCommands {
         path: PathBuf,
     },
     /// Remove a project from the workspace
+    #[command(alias = "rm")]
     Remove {
         /// The root path of the project to remove
         #[arg(required = true)]
         path: PathBuf,
     },
     /// List all projects currently in the workspace
+    #[command(alias = "ls")]
     List,
 }
 
@@ -344,7 +346,7 @@ async fn handle_projects(command: ProjectCommands, config_path: PathBuf) -> Resu
     match command {
         ProjectCommands::Add { path } => {
             let absolute_path = path.canonicalize()?;
-            info!("Adding project at: {}", absolute_path.display());
+            println!("✅ Adding project: {}", beautify_path(&absolute_path));
 
             let project = crate::project::Project::new(&absolute_path)?;
             let ser_project = SerProject {
@@ -361,32 +363,33 @@ async fn handle_projects(command: ProjectCommands, config_path: PathBuf) -> Resu
             let content = toml::to_string_pretty(&config)?;
             fs::write(&config_path, content)?;
 
-            info!("Successfully added project and updated config.");
+            println!("🎉 Project successfully added to workspace!");
         }
         ProjectCommands::Remove { path } => {
             let absolute_path = path.canonicalize()?;
-            info!("Removing project at: {}", absolute_path.display());
+            println!("🗑️  Removing project: {}", beautify_path(&absolute_path));
 
             if config.projects.remove(&absolute_path).is_some() {
                 // Save config
                 let content = toml::to_string_pretty(&config)?;
                 fs::write(&config_path, content)?;
-                info!("Successfully removed project and updated config.");
+                println!("✅ Project successfully removed from workspace!");
             } else {
-                warn!("Project not found: {}", absolute_path.display());
+                println!("⚠️  Project not found: {}", beautify_path(&absolute_path));
             }
         }
         ProjectCommands::List => {
             if config.projects.is_empty() {
-                info!("No projects found in the workspace.");
+                println!("📭 No projects found in the workspace.");
+                println!("💡 Add a project using: rust-devtools-mcp projects add <path>");
             } else {
-                info!("Projects in workspace:");
+                println!("📋 Projects in workspace:");
                 for (root, project) in &config.projects {
                     let name = root
                         .file_name()
                         .and_then(|n| n.to_str())
                         .unwrap_or("<unknown>");
-                    info!("  - {} ({})", name, project.root.display());
+                    println!("  • {} {}", name, beautify_path(&project.root));
                 }
             }
         }
@@ -400,8 +403,8 @@ async fn handle_config(args: ConfigArgs, config_path: PathBuf) -> Result<()> {
     let (sender, _) = flume::unbounded();
     let context = ContextType::new(args.port, config_path.clone(), sender).await;
 
-    info!("Configuration file: {}", config_path.display());
-    info!("MCP Configuration for Cursor (.cursor/mcp.json):");
+    println!("⚙️  Configuration file: {}", beautify_path(&config_path));
+    println!("📋 MCP Configuration for Cursor (.cursor/mcp.json):");
     println!("{}", context.mcp_configuration());
 
     Ok(())
