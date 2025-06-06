@@ -41,19 +41,20 @@ pub async fn run_server(context: Context) -> Result<()> {
         TransportType::StreamableHttp { host, port } => {
             use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
             let addr = format!("{}:{}", host, port);
-            
+
             let service = streamable_http_server::StreamableHttpService::new(
                 move || DevToolsServer::new(context.clone()),
                 LocalSessionManager::default().into(),
                 Default::default(),
             );
-            
+
             let router = axum::Router::new().nest_service("/mcp", service);
             let tcp_listener = tokio::net::TcpListener::bind(&addr).await?;
             tracing::info!("StreamableHttp server listening on {}", addr);
             if let Err(e) = axum::serve(tcp_listener, router)
                 .with_graceful_shutdown(async { tokio::signal::ctrl_c().await.unwrap() })
-                .await {
+                .await
+            {
                 tracing::error!("StreamableHttp server error: {}", e);
                 return Err(e.into());
             }

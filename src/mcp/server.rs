@@ -1,13 +1,13 @@
 use crate::context::Context;
 use crate::lsp::{format_marked_string, get_location_contents};
-use crate::mcp::utils::{
-    error_response_v2, find_symbol_position_in_file, get_file_lines, get_info_from_request,
-    RequestExtension,
-};
 use crate::mcp::McpNotification;
+use crate::mcp::utils::{
+    RequestExtension, error_response_v2, find_symbol_position_in_file, get_file_lines,
+    get_info_from_request,
+};
 use fuzzt::get_top_n;
 use lsp_types::HoverContents;
-use rmcp::{model::*, schemars, tool, ServerHandler, service::RequestContext, service::RoleServer};
+use rmcp::{ServerHandler, model::*, schemars, service::RequestContext, service::RoleServer, tool};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -69,7 +69,7 @@ impl DevToolsServer {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
                     "Invalid project path '{}': {}",
                     project_path, e
-                ))]))
+                ))]));
             }
         };
 
@@ -240,7 +240,10 @@ impl DevToolsServer {
     }
 
     // --- symbol_docs ---
-    #[tool(name = "symbol_docs", description = "Get the documentation for a symbol")]
+    #[tool(
+        name = "symbol_docs",
+        description = "Get the documentation for a symbol"
+    )]
     async fn symbol_docs(
         &self,
         #[tool(aggr)] args: CallToolRequestParam,
@@ -451,7 +454,7 @@ impl ServerHandler for DevToolsServer {
         ServerInfo {
             protocol_version: ProtocolVersion::default(),
             server_info: Implementation {
-                name: "cursor_rust_tools".to_string(),
+                name: "rust-devtools-mcp".to_string(),
                 version: "0.1.0".to_string(),
             },
             instructions: Some(GUIDANCE_PROMPT.to_string()),
@@ -465,13 +468,14 @@ impl ServerHandler for DevToolsServer {
         _context: RequestContext<RoleServer>,
     ) -> impl std::future::Future<Output = Result<ListPromptsResult, rmcp::Error>> + Send + '_ {
         std::future::ready(Ok(ListPromptsResult {
-            prompts: vec![
-                Prompt {
-                    name: "rust_development_guidance".to_string(),
-                    description: Some("Comprehensive guidance for Rust development using rust-devtools-mcp".to_string()),
-                    arguments: None,
-                },
-            ],
+            prompts: vec![Prompt {
+                name: "rust_development_guidance".to_string(),
+                description: Some(
+                    "Comprehensive guidance for Rust development using rust-devtools-mcp"
+                        .to_string(),
+                ),
+                arguments: None,
+            }],
             next_cursor: None,
         }))
     }
@@ -482,20 +486,21 @@ impl ServerHandler for DevToolsServer {
         _context: RequestContext<RoleServer>,
     ) -> impl std::future::Future<Output = Result<GetPromptResult, rmcp::Error>> + Send + '_ {
         match request.name.as_str() {
-            "rust_development_guidance" => {
-                std::future::ready(Ok(GetPromptResult {
-                    description: Some("Guidance for using Rust development tools effectively".to_string()),
-                    messages: vec![
-                        PromptMessage {
-                            role: PromptMessageRole::User,
-                            content: PromptMessageContent::Text {
-                                text: GUIDANCE_PROMPT.to_string(),
-                            },
-                        },
-                    ],
-                }))
-            }
-            _ => std::future::ready(Err(rmcp::Error::internal_error(format!("Unknown prompt: {}", request.name), None))),
+            "rust_development_guidance" => std::future::ready(Ok(GetPromptResult {
+                description: Some(
+                    "Guidance for using Rust development tools effectively".to_string(),
+                ),
+                messages: vec![PromptMessage {
+                    role: PromptMessageRole::User,
+                    content: PromptMessageContent::Text {
+                        text: GUIDANCE_PROMPT.to_string(),
+                    },
+                }],
+            })),
+            _ => std::future::ready(Err(rmcp::Error::internal_error(
+                format!("Unknown prompt: {}", request.name),
+                None,
+            ))),
         }
     }
 }

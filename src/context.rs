@@ -96,12 +96,8 @@ impl ContextNotification {
             ContextNotification::Mcp(McpNotification::Response { content, .. }) => {
                 format!("MCP Response: {:?}", content)
             }
-            ContextNotification::ProjectAdded(_) => {
-                "Project Added".to_string()
-            }
-            ContextNotification::ProjectRemoved(_) => {
-                "Project Removed".to_string()
-            }
+            ContextNotification::ProjectAdded(_) => "Project Added".to_string(),
+            ContextNotification::ProjectRemoved(_) => "Project Removed".to_string(),
             ContextNotification::ProjectDescriptions(descriptions) => {
                 if descriptions.is_empty() {
                     "No projects loaded".to_string()
@@ -436,7 +432,7 @@ impl Context {
 const CONFIG_TEMPLATE: &str = r#"
 {
     "mcpServers": {
-        "cursor_rust_tools": {
+        "rust-devtools-mcp": {
             "url": "http://{{HOST}}:{{PORT}}/sse",
             "env": {
                 "API_KEY": ""

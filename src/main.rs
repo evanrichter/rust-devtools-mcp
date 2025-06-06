@@ -215,8 +215,11 @@ async fn run_serve(args: ServeArgs, config_path: PathBuf) -> Result<()> {
         let mut indexing_finished_sent = false;
         let mut last_indexing_activity = std::time::Instant::now();
         let mut any_stage_completed = false;
-        
-        info!("Initial state - indexing_finished_sent: {}", indexing_finished_sent);
+
+        info!(
+            "Initial state - indexing_finished_sent: {}",
+            indexing_finished_sent
+        );
 
         loop {
             while let Ok(notification) = receiver.try_recv() {
@@ -226,7 +229,6 @@ async fn run_serve(args: ServeArgs, config_path: PathBuf) -> Result<()> {
                 print!("\r\x1B[2K");
                 use std::io::{self, Write};
                 io::stdout().flush().unwrap();
-
 
                 match &notification {
                     ContextNotification::Lsp(LspNotification::Indexing {
@@ -259,30 +261,35 @@ async fn run_serve(args: ServeArgs, config_path: PathBuf) -> Result<()> {
                             }
                         } else {
                             // This is a WorkDoneProgress::End event for a specific stage
-                            let stage_name = progress.as_ref()
+                            let stage_name = progress
+                                .as_ref()
                                 .map(|p| format!("{:?}", p.stage))
                                 .unwrap_or_else(|| "Unknown".to_string());
-                                                        
+
                             // Check if this is a known indexing stage completion
-                            let is_indexing_stage = progress.as_ref()
-                                .map(|p| matches!(p.stage, 
-                                    crate::lsp::IndexingStage::CachePriming | 
-                                    crate::lsp::IndexingStage::Indexing |
-                                    crate::lsp::IndexingStage::Building
-                                ))
+                            let is_indexing_stage = progress
+                                .as_ref()
+                                .map(|p| {
+                                    matches!(
+                                        p.stage,
+                                        crate::lsp::IndexingStage::CachePriming
+                                            | crate::lsp::IndexingStage::Indexing
+                                            | crate::lsp::IndexingStage::Building
+                                    )
+                                })
                                 .unwrap_or(false);
-                            
+
                             // Always clear the current line for stage completion
                             print!("\r\x1B[2K");
                             io::stdout().flush().unwrap();
-                            
+
                             // Show stage completion message
                             info!(
                                 "[{}] ✅ {} Stage: Completed",
                                 beautify_path(project),
                                 stage_name
                             );
-                            
+
                             // Mark indexing as finished for any known indexing stage completion
                             if is_indexing_stage {
                                 is_indexing = false;
@@ -300,7 +307,7 @@ async fn run_serve(args: ServeArgs, config_path: PathBuf) -> Result<()> {
                     }
                 }
             }
-            
+
             // Check if indexing has been idle for a while and show final completion message
             if any_stage_completed && !indexing_finished_sent && !is_indexing {
                 let idle_duration = last_indexing_activity.elapsed();
@@ -309,7 +316,7 @@ async fn run_serve(args: ServeArgs, config_path: PathBuf) -> Result<()> {
                     indexing_finished_sent = true;
                 }
             }
-            
+
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         }
     };
@@ -401,13 +408,13 @@ async fn handle_projects(command: ProjectCommands, config_path: PathBuf) -> Resu
             } else {
                 let project_count = config.projects.len();
                 println!("🧹 Clearing {} project(s) from workspace...", project_count);
-                
+
                 config.projects.clear();
-                
+
                 // Save config
                 let content = toml::to_string_pretty(&config)?;
                 fs::write(&config_path, content)?;
-                
+
                 println!("✅ All projects successfully cleared from workspace!");
             }
         }

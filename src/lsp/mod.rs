@@ -12,8 +12,8 @@ pub use utils::*;
 
 #[derive(Debug, Clone)]
 pub enum LspNotification {
-    Indexing { 
-        project: PathBuf, 
+    Indexing {
+        project: PathBuf,
         is_indexing: bool,
         progress: Option<IndexingProgress>,
     },
