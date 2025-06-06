@@ -425,7 +425,7 @@ impl Context {
             if let Err(e) = p.lsp.shutdown().await {
                 tracing::error!(
                     "Failed to shutdown LSP for project {:?}: {}",
-                    p.project.root(),
+                    crate::beautify_path(p.project.root()),
                     e
                 );
             }

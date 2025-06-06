@@ -18,7 +18,7 @@ use tracing_subscriber::{
 };
 
 /// Beautify path display by converting long paths to a more concise format
-fn beautify_path(path: &std::path::Path) -> String {
+pub fn beautify_path(path: &std::path::Path) -> String {
     let path_str = path.to_string_lossy();
 
     // Remove Windows \\?\\ prefix
