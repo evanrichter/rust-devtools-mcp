@@ -1,19 +1,18 @@
+use anyhow::Result;
+use dashmap::DashMap;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use tokio::sync::{RwLock, RwLockWriteGuard};
 
 use crate::cargo_remote::CargoRemote;
-use crate::docs::{Docs, DocsNotification};
 use crate::lsp::LspNotification;
 use crate::mcp::McpNotification;
 use crate::{
     lsp::RustAnalyzerLsp,
     project::{Project, TransportType},
 };
-use anyhow::Result;
 use flume::Sender;
 use serde::{Deserialize, Serialize};
 
@@ -22,13 +21,11 @@ pub struct ProjectDescription {
     pub root: PathBuf,
     pub name: String,
     pub is_indexing_lsp: bool,
-    pub is_indexing_docs: bool,
 }
 
 #[derive(Debug, Clone)]
 pub enum ContextNotification {
     Lsp(LspNotification),
-    Docs(DocsNotification),
     Mcp(McpNotification),
     ProjectAdded(PathBuf),
     ProjectRemoved(PathBuf),
@@ -39,9 +36,6 @@ impl ContextNotification {
     pub fn notification_path(&self) -> PathBuf {
         match self {
             ContextNotification::Lsp(LspNotification::Indexing { project, .. }) => project.clone(),
-            ContextNotification::Docs(DocsNotification::Indexing { project, .. }) => {
-                project.clone()
-            }
             ContextNotification::Mcp(McpNotification::Request { project, .. }) => project.clone(),
             ContextNotification::Mcp(McpNotification::Response { project, .. }) => project.clone(),
             ContextNotification::ProjectAdded(project) => project.clone(),
@@ -52,17 +46,49 @@ impl ContextNotification {
 
     pub fn description(&self) -> String {
         match self {
-            ContextNotification::Lsp(LspNotification::Indexing { is_indexing, .. }) => {
-                format!(
-                    "LSP Indexing: {}",
-                    if *is_indexing { "Started" } else { "Finished" }
-                )
-            }
-            ContextNotification::Docs(DocsNotification::Indexing { is_indexing, .. }) => {
-                format!(
-                    "Docs Indexing: {}",
-                    if *is_indexing { "Started" } else { "Finished" }
-                )
+            ContextNotification::Lsp(LspNotification::Indexing {
+                is_indexing,
+                progress,
+                ..
+            }) => {
+                if *is_indexing {
+                    if let Some(progress) = progress {
+                        let stage_icon = match progress.stage {
+                            crate::lsp::IndexingStage::Building => "🔨",
+                            crate::lsp::IndexingStage::CachePriming => "⚡",
+                            crate::lsp::IndexingStage::Indexing => "📚",
+                            crate::lsp::IndexingStage::Unknown(_) => "⚙️",
+                        };
+
+                        let stage_name = match &progress.stage {
+                            crate::lsp::IndexingStage::Building => "Building",
+                            crate::lsp::IndexingStage::CachePriming => "Cache Priming",
+                            crate::lsp::IndexingStage::Indexing => "Indexing",
+                            crate::lsp::IndexingStage::Unknown(s) => s,
+                        };
+
+                        let mut parts = vec![format!("{} {}", stage_icon, stage_name)];
+
+                        if let (Some(current), Some(total)) =
+                            (progress.current_count, progress.total_count)
+                        {
+                            let percentage = (current as f32 / total as f32 * 100.0) as u32;
+                            parts.push(format!("[{}/{}] {}%", current, total, percentage));
+                        } else if let Some(percentage) = progress.percentage {
+                            parts.push(format!("{}%", percentage as u32));
+                        }
+
+                        if let Some(crate_name) = &progress.current_crate {
+                            parts.push(format!("📦 {}", crate_name));
+                        }
+
+                        parts.join(" ")
+                    } else {
+                        "🔄 LSP Indexing: Started".to_string()
+                    }
+                } else {
+                    "✅ LSP Indexing: Finished".to_string()
+                }
             }
             ContextNotification::Mcp(McpNotification::Request { content, .. }) => {
                 format!("MCP Request: {:?}", content)
@@ -70,47 +96,66 @@ impl ContextNotification {
             ContextNotification::Mcp(McpNotification::Response { content, .. }) => {
                 format!("MCP Response: {:?}", content)
             }
-            ContextNotification::ProjectAdded(project) => {
-                format!("Project Added: {:?}", project)
+            ContextNotification::ProjectAdded(_) => {
+                "Project Added".to_string()
             }
-            ContextNotification::ProjectRemoved(project) => {
-                format!("Project Removed: {:?}", project)
+            ContextNotification::ProjectRemoved(_) => {
+                "Project Removed".to_string()
             }
-            ContextNotification::ProjectDescriptions(_) => "Project Descriptions".to_string(),
+            ContextNotification::ProjectDescriptions(descriptions) => {
+                if descriptions.is_empty() {
+                    "No projects loaded".to_string()
+                } else {
+                    let project_count = descriptions.len();
+                    let indexing_count = descriptions.iter().filter(|d| d.is_indexing_lsp).count();
+                    let ready_count = project_count - indexing_count;
+
+                    let mut parts = vec![
+                        format!("Projects: {} total", project_count),
+                        format!("🚀 Ready: {}", ready_count),
+                    ];
+
+                    if indexing_count > 0 {
+                        parts.push(format!("🔄 Indexing: {}", indexing_count));
+                    }
+
+                    parts.join(", ")
+                }
+            }
         }
     }
 }
 
 const HOSTNAME: &str = "localhost";
-const CONFIGURATION_FILE: &str = ".cursor-rust-tools";
 
 #[derive(Debug)]
 pub struct ProjectContext {
     pub project: Project,
     pub lsp: RustAnalyzerLsp,
-    pub docs: Docs,
     pub cargo_remote: CargoRemote,
     pub is_indexing_lsp: AtomicBool,
-    pub is_indexing_docs: AtomicBool,
 }
 
 #[derive(Clone)]
 pub struct Context {
-    projects: Arc<RwLock<HashMap<PathBuf, Arc<ProjectContext>>>>,
+    projects: Arc<DashMap<PathBuf, Arc<ProjectContext>>>,
     transport: TransportType,
     lsp_sender: Sender<LspNotification>,
-    docs_sender: Sender<DocsNotification>,
     mcp_sender: Sender<McpNotification>,
     notifier: Sender<ContextNotification>,
+    config_path: PathBuf,
 }
 
 impl Context {
-    pub async fn new(port: u16, notifier: Sender<ContextNotification>) -> Self {
+    pub async fn new(
+        port: u16,
+        config_path: PathBuf,
+        notifier: Sender<ContextNotification>,
+    ) -> Self {
         let (lsp_sender, lsp_receiver) = flume::unbounded();
-        let (docs_sender, docs_receiver) = flume::unbounded();
         let (mcp_sender, mcp_receiver) = flume::unbounded();
 
-        let projects = Arc::new(RwLock::new(HashMap::new()));
+        let projects = Arc::new(DashMap::<PathBuf, Arc<ProjectContext>>::new());
 
         let cloned_projects = projects.clone();
         let cloned_notifier = notifier.clone();
@@ -122,23 +167,18 @@ impl Context {
                             tracing::error!("Failed to send MCP notification: {}", e);
                         }
                     }
-                    Ok(ref notification @ DocsNotification::Indexing { ref project, is_indexing }) = docs_receiver.recv_async() => {
-                        if let Err(e) = cloned_notifier.send(ContextNotification::Docs(notification.clone())) {
-                            tracing::error!("Failed to send docs notification: {}", e);
-                        }
-                        let mut projects: RwLockWriteGuard<'_, HashMap<PathBuf, Arc<ProjectContext>>> = cloned_projects.write().await;
-                        if let Some(project) = projects.get_mut(project) {
-                            project.is_indexing_docs.store(is_indexing, std::sync::atomic::Ordering::Relaxed);
-                        }
-                    }
-                    Ok(ref notification @ LspNotification::Indexing { ref project, is_indexing }) = lsp_receiver.recv_async() => {
+                    Ok(ref notification @ LspNotification::Indexing { ref project, is_indexing, .. }) = lsp_receiver.recv_async() => {
                         if let Err(e) = cloned_notifier.send(ContextNotification::Lsp(notification.clone())) {
                             tracing::error!("Failed to send LSP notification: {}", e);
                         }
-                        let mut projects: RwLockWriteGuard<'_, HashMap<PathBuf, Arc<ProjectContext>>> = cloned_projects.write().await;
-                        if let Some(project) = projects.get_mut(project) {
-                            project.is_indexing_lsp.store(is_indexing, std::sync::atomic::Ordering::Relaxed);
+                        if let Some(project) = cloned_projects.get(project) {
+                            project.value().is_indexing_lsp.store(is_indexing, std::sync::atomic::Ordering::Relaxed);
                         }
+                    }
+                    else => {
+                        // All receivers are closed, break the loop
+                        tracing::debug!("All notification receivers closed, stopping notification handler");
+                        break;
                     }
                 }
             }
@@ -146,14 +186,14 @@ impl Context {
 
         Self {
             projects,
-            transport: TransportType::Sse {
+            transport: TransportType::StreamableHttp {
                 host: HOSTNAME.to_string(),
                 port,
             },
             lsp_sender,
-            docs_sender,
             mcp_sender,
             notifier,
+            config_path,
         }
     }
 
@@ -172,13 +212,12 @@ impl Context {
             .replace("{{PORT}}", &port.to_string())
     }
 
-    pub fn configuration_file(&self) -> String {
-        format!("~/{}", CONFIGURATION_FILE)
+    pub fn config_path(&self) -> &PathBuf {
+        &self.config_path
     }
 
     pub async fn project_descriptions(&self) -> Vec<ProjectDescription> {
-        let projects_map = self.projects.read().await;
-        project_descriptions(&projects_map).await
+        project_descriptions(&self.projects).await
     }
 
     pub fn transport(&self) -> &TransportType {
@@ -190,19 +229,18 @@ impl Context {
         Ok(())
     }
 
-    fn config_path(&self) -> PathBuf {
-        let parsed = shellexpand::tilde(&self.configuration_file()).to_string();
-        PathBuf::from(parsed)
-    }
-
     async fn write_config(&self) -> Result<()> {
-        let projects_map = self.projects.read().await;
-        let projects_to_save: Vec<SerProject> = projects_map
-            .values()
-            .map(|pc| &pc.project)
-            .map(|p| SerProject {
-                root: p.root().to_string_lossy().to_string(),
-                ignore_crates: p.ignore_crates().to_vec(),
+        let projects_to_save: HashMap<PathBuf, SerProject> = self
+            .projects
+            .iter()
+            .map(|entry| {
+                let path = entry.key().clone();
+                let pc = entry.value().clone();
+                let ser_project = SerProject {
+                    root: pc.project.root().clone(),
+                    ignore_crates: pc.project.ignore_crates().to_vec(),
+                };
+                (path, ser_project)
             })
             .collect();
         let config = SerConfig {
@@ -260,10 +298,10 @@ impl Context {
             }
         };
 
-        for project in loaded_config.projects {
+        for (_, ser_project) in loaded_config.projects {
             let project = Project {
-                root: PathBuf::from(&project.root),
-                ignore_crates: project.ignore_crates,
+                root: ser_project.root.clone(),
+                ignore_crates: ser_project.ignore_crates,
             };
             // Validate project root before adding
             if !project.root().exists() || !project.root().is_dir() {
@@ -301,21 +339,15 @@ impl Context {
     pub async fn add_project(&self, project: Project) -> Result<()> {
         let root = project.root().clone();
         let lsp = RustAnalyzerLsp::new(&project, self.lsp_sender.clone()).await?;
-        let docs = Docs::new(project.clone(), self.docs_sender.clone())?;
-        docs.update_index().await?;
         let cargo_remote = CargoRemote::new(project.clone());
         let project_context = Arc::new(ProjectContext {
             project,
             lsp,
-            docs,
             cargo_remote,
             is_indexing_lsp: AtomicBool::new(true),
-            is_indexing_docs: AtomicBool::new(true),
         });
 
-        let mut projects_map = self.projects.write().await;
-        projects_map.insert(root.clone(), project_context);
-        drop(projects_map);
+        self.projects.insert(root.clone(), project_context);
 
         self.request_project_descriptions();
 
@@ -333,10 +365,7 @@ impl Context {
 
     /// Remove a project from the context
     pub async fn remove_project(&self, root: &PathBuf) -> Option<Arc<ProjectContext>> {
-        let project = {
-            let mut projects_map = self.projects.write().await;
-            projects_map.remove(root)
-        };
+        let project = self.projects.remove(root).map(|(_, v)| v);
 
         if project.is_some() {
             if let Err(e) = self
@@ -357,8 +386,7 @@ impl Context {
         let projects = self.projects.clone();
         let notifier = self.notifier.clone();
         tokio::spawn(async move {
-            let projects_map = projects.read().await;
-            let project_descriptions = project_descriptions(&projects_map).await;
+            let project_descriptions = project_descriptions(&projects).await;
             if let Err(e) = notifier.send(ContextNotification::ProjectDescriptions(
                 project_descriptions,
             )) {
@@ -369,8 +397,7 @@ impl Context {
 
     /// Get a reference to a project context by its root path
     pub async fn get_project(&self, root: &PathBuf) -> Option<Arc<ProjectContext>> {
-        let projects_map = self.projects.read().await;
-        projects_map.get(root).cloned()
+        self.projects.get(root).map(|entry| entry.value().clone())
     }
 
     /// Get a reference to a project context by any path within the project
@@ -378,38 +405,23 @@ impl Context {
     pub async fn get_project_by_path(&self, path: &Path) -> Option<Arc<ProjectContext>> {
         let mut current_path = path.to_path_buf();
 
-        let projects_map = self.projects.read().await;
-
-        if let Some(project) = projects_map.get(&current_path) {
-            return Some(project.clone());
+        if let Some(project) = self.projects.get(&current_path) {
+            return Some(project.value().clone());
         }
 
         while let Some(parent) = current_path.parent() {
             current_path = parent.to_path_buf();
-            if let Some(project) = projects_map.get(&current_path) {
-                return Some(project.clone());
+            if let Some(project) = self.projects.get(&current_path) {
+                return Some(project.value().clone());
             }
         }
 
         None
     }
 
-    pub async fn force_index_docs(&self, project: &PathBuf) -> Result<()> {
-        let Some(project_context) = self.get_project(project).await else {
-            return Err(anyhow::anyhow!("Project not found"));
-        };
-        let oldval = project_context
-            .is_indexing_docs
-            .load(std::sync::atomic::Ordering::Relaxed);
-        project_context
-            .is_indexing_docs
-            .store(!oldval, std::sync::atomic::Ordering::Relaxed);
-        Ok(())
-    }
-
     pub async fn shutdown_all(&self) {
-        let projects = self.projects.write().await;
-        for p in projects.values() {
+        for entry in self.projects.iter() {
+            let p = entry.value();
             if let Err(e) = p.lsp.shutdown().await {
                 tracing::error!(
                     "Failed to shutdown LSP for project {:?}: {}",
@@ -435,36 +447,36 @@ const CONFIG_TEMPLATE: &str = r#"
 "#;
 
 #[derive(Serialize, Deserialize, Debug)]
-struct SerConfig {
-    projects: Vec<SerProject>,
+pub struct SerConfig {
+    pub projects: HashMap<PathBuf, SerProject>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-struct SerProject {
-    root: String,
-    ignore_crates: Vec<String>,
+pub struct SerProject {
+    pub root: PathBuf,
+    pub ignore_crates: Vec<String>,
 }
 
 async fn project_descriptions(
-    projects: &HashMap<PathBuf, Arc<ProjectContext>>,
+    projects: &DashMap<PathBuf, Arc<ProjectContext>>,
 ) -> Vec<ProjectDescription> {
     projects
-        .values()
-        .map(|project| ProjectDescription {
-            root: project.project.root().clone(),
-            name: project
-                .project
-                .root()
-                .file_name()
-                .unwrap()
-                .to_string_lossy()
-                .to_string(),
-            is_indexing_lsp: project
-                .is_indexing_lsp
-                .load(std::sync::atomic::Ordering::Relaxed),
-            is_indexing_docs: project
-                .is_indexing_docs
-                .load(std::sync::atomic::Ordering::Relaxed),
+        .iter()
+        .map(|entry| {
+            let project = entry.value();
+            ProjectDescription {
+                root: project.project.root().clone(),
+                name: project
+                    .project
+                    .root()
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_string(),
+                is_indexing_lsp: project
+                    .is_indexing_lsp
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            }
         })
         .collect()
 }

@@ -50,9 +50,14 @@ pub async fn run_server(context: Context) -> Result<()> {
             
             let router = axum::Router::new().nest_service("/mcp", service);
             let tcp_listener = tokio::net::TcpListener::bind(&addr).await?;
-            let _ = axum::serve(tcp_listener, router)
+            tracing::info!("StreamableHttp server listening on {}", addr);
+            if let Err(e) = axum::serve(tcp_listener, router)
                 .with_graceful_shutdown(async { tokio::signal::ctrl_c().await.unwrap() })
-                .await;
+                .await {
+                tracing::error!("StreamableHttp server error: {}", e);
+                return Err(e.into());
+            }
+            tracing::info!("StreamableHttp server shutdown gracefully");
         }
     }
     Ok(())

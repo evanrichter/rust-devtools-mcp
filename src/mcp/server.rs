@@ -1,20 +1,18 @@
 use crate::context::Context;
 use crate::lsp::{format_marked_string, get_location_contents};
-use crate::mcp::McpNotification;
 use crate::mcp::utils::{
-    RequestExtension, error_response_v2, find_symbol_position_in_file, get_file_lines,
-    get_info_from_request,
+    error_response_v2, find_symbol_position_in_file, get_file_lines, get_info_from_request,
+    RequestExtension,
 };
+use crate::mcp::McpNotification;
 use fuzzt::get_top_n;
 use lsp_types::HoverContents;
-use rmcp::{
-    ServerHandler,
-    model::*,
-    schemars,
-    tool,
-};
+use rmcp::{model::*, schemars, tool, ServerHandler, service::RequestContext, service::RoleServer};
 use std::collections::HashMap;
 use std::path::PathBuf;
+
+// Use include_str! to load the guidance prompt from an external file at compile time.
+const GUIDANCE_PROMPT: &str = include_str!("guidance_prompt.md");
 
 #[derive(Clone)]
 pub struct DevToolsServer {
@@ -38,7 +36,11 @@ async fn notify_req(ctx: &Context, req: &CallToolRequestParam, path: PathBuf) {
         .await;
 }
 async fn notify_resp(ctx: &Context, resp: &CallToolResult, path: PathBuf) {
-    tracing::info!("MCP Response for project {}: success={}", path.display(), resp.is_error.is_none());
+    tracing::info!(
+        "MCP Response for project {}: success={}",
+        path.display(),
+        resp.is_error.is_none()
+    );
     let _ = ctx
         .send_mcp_notification(McpNotification::Response {
             content: resp.clone(),
@@ -51,49 +53,61 @@ async fn notify_resp(ctx: &Context, resp: &CallToolResult, path: PathBuf) {
 impl DevToolsServer {
     // --- Project Management ---
     #[tool(
-        name = "add_project",
-        description = "Add a new project to the workspace by specifying its root path"
+        name = "ensure_project_is_loaded",
+        description = "Ensures a project is loaded into the workspace. If not already present, it will be added. This is safe to call multiple times."
     )]
-    async fn add_project(
+    async fn ensure_project_is_loaded(
         &self,
         #[tool(param)]
-        #[schemars(description = "The root path of the project to add")]
+        #[schemars(description = "The absolute root path of the project to load.")]
         project_path: String,
     ) -> Result<CallToolResult, rmcp::Error> {
-        let path = PathBuf::from(shellexpand::tilde(&project_path).to_string());
-        
-        if !path.exists() {
-            return Ok(CallToolResult::error(
-                vec![Content::text("Project path does not exist".to_string())]
-            ));
+        let path = match PathBuf::from(shellexpand::tilde(&project_path).to_string()).canonicalize()
+        {
+            Ok(p) => p,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Invalid project path '{}': {}",
+                    project_path, e
+                ))]))
+            }
+        };
+
+        // 1. Check if project is already loaded
+        if self.context.get_project(&path).await.is_some() {
+            let message = format!("Project {} is already loaded.", path.display());
+            return Ok(CallToolResult::success(vec![Content::text(message)]));
         }
-        
+
+        // 2. If not loaded, perform validation and add it
         if !path.is_dir() {
-            return Ok(CallToolResult::error(
-                vec![Content::text("Project path must be a directory".to_string())]
-            ));
+            return Ok(CallToolResult::error(vec![Content::text(
+                "Project path must be a directory".to_string(),
+            )]));
         }
-        
+
         let project = match crate::project::Project::new(&path) {
             Ok(p) => p,
             Err(e) => {
-                return Ok(CallToolResult::error(
-                    vec![Content::text(format!("Failed to create project: {}", e))]
-                ));
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Failed to create project: {}",
+                    e
+                ))]));
             }
         };
-        
+
         match self.context.add_project(project).await {
             Ok(_) => {
-                let message = format!("Successfully added project: {}", path.display());
+                let message = format!("Successfully loaded new project: {}", path.display());
                 Ok(CallToolResult::success(vec![Content::text(message)]))
             }
-            Err(e) => Ok(CallToolResult::error(
-                vec![Content::text(format!("Failed to add project: {}", e))]
-            )),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "Failed to load project: {}",
+                e
+            ))])),
         }
     }
-    
+
     #[tool(
         name = "remove_project",
         description = "Remove a project from the workspace by specifying its root path"
@@ -105,70 +119,52 @@ impl DevToolsServer {
         project_path: String,
     ) -> Result<CallToolResult, rmcp::Error> {
         let path = PathBuf::from(shellexpand::tilde(&project_path).to_string());
-        
+
         match self.context.remove_project(&path).await {
             Some(_) => {
                 let message = format!("Successfully removed project: {}", path.display());
                 Ok(CallToolResult::success(vec![Content::text(message)]))
             }
-            None => Ok(CallToolResult::error(
-                vec![Content::text(format!("Project not found: {}", path.display()))]
-            )),
+            #[allow(non_snake_case)]
+            None => Ok(CallToolResult::error(vec![Content::text(format!(
+                "Project not found: {}",
+                path.display()
+            ))])),
         }
     }
-    
+
     #[tool(
         name = "list_projects",
         description = "List all projects currently in the workspace"
     )]
     async fn list_projects(&self) -> Result<CallToolResult, rmcp::Error> {
         let projects = self.context.project_descriptions().await;
-        
+
         if projects.is_empty() {
             return Ok(CallToolResult::success(vec![Content::text(
-                "No projects found in workspace".to_string(),
+                "No projects found in workspace. Use 'ensure_project_is_loaded' to add one."
+                    .to_string(),
             )]));
         }
-        
+
         let mut result = String::from("Projects in workspace:\n");
         for project in projects {
-            let status = if project.is_indexing_lsp || project.is_indexing_docs {
-                " (indexing)"
+            let status = if project.is_indexing_lsp {
+                " (indexing...)"
             } else {
-                ""
+                " (ready)"
             };
-            result.push_str(&format!("- {} ({}){}\n", 
-                project.name, 
+            result.push_str(&format!(
+                "- {} ({}){}\n",
+                project.name,
                 project.root.display(),
                 status
             ));
         }
-        
+
         Ok(CallToolResult::success(vec![Content::text(result)]))
     }
-    
-    #[tool(
-        name = "force_reindex_docs",
-        description = "Force reindexing of documentation for a specific project"
-    )]
-    async fn force_reindex_docs(
-        &self,
-        #[tool(param)]
-        #[schemars(description = "The root path of the project to reindex docs for")]
-        project_path: String,
-    ) -> Result<CallToolResult, rmcp::Error> {
-        let path = PathBuf::from(shellexpand::tilde(&project_path).to_string());
-        
-        match self.context.force_index_docs(&path).await {
-            Ok(_) => {
-                let message = format!("Successfully started docs reindexing for: {}", path.display());
-                Ok(CallToolResult::success(vec![Content::text(message)]))
-            }
-            Err(e) => Ok(CallToolResult::error(
-                vec![Content::text(format!("Failed to reindex docs: {}", e))]
-            )),
-        }
-    }
+
     // --- cargo_check ---
     #[tool(
         name = "cargo_check",
@@ -243,61 +239,8 @@ impl DevToolsServer {
         Ok(result)
     }
 
-    // --- crate_docs ---
-    #[tool(
-        name = "crate_docs",
-        description = "Get the documentation for a cargo dependency"
-    )]
-    async fn crate_docs(
-        &self,
-        #[tool(aggr)] args: CallToolRequestParam,
-    ) -> Result<CallToolResult, rmcp::Error> {
-        let file = args.get_file()?;
-        let (project, _, absolute_file) = match get_info_from_request(&self.context, &file).await {
-            Ok(info) => info,
-            Err(e) => return Ok(error_response_v2(&e)),
-        };
-        notify_req(&self.context, &args, absolute_file.clone()).await;
-
-        let dependency = args
-            .arguments
-            .as_ref()
-            .and_then(|a| a.get("dependency"))
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| rmcp::Error::invalid_params("dependency is required", None))?
-            .to_string();
-        let symbol = args
-            .arguments
-            .as_ref()
-            .and_then(|a| a.get("symbol"))
-            .and_then(|v| v.as_str())
-            .map(String::from);
-
-        let text = if let Some(symbol) = symbol {
-            let docs = project
-                .docs
-                .crate_symbol_docs(&dependency, &symbol)
-                .await
-                .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?;
-            docs.into_iter().map(|(k, v)| format!("{k}: {v}")).collect()
-        } else {
-            project
-                .docs
-                .crate_docs(&dependency)
-                .await
-                .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?
-        };
-
-        let result = CallToolResult::success(vec![Content::text(text)]);
-        notify_resp(&self.context, &result, absolute_file).await;
-        Ok(result)
-    }
-
     // --- symbol_docs ---
-    #[tool(
-        name = "symbol_docs",
-        description = "Get the documentation for a symbol"
-    )]
+    #[tool(name = "symbol_docs", description = "Get the documentation for a symbol")]
     async fn symbol_docs(
         &self,
         #[tool(aggr)] args: CallToolRequestParam,
@@ -372,7 +315,7 @@ impl DevToolsServer {
         let contents = get_location_contents(type_definition)
             .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?
             .iter()
-            .map(|(content, path)| format!("## {}\n``` rust\n{}\n```", path.display(), content))
+            .map(|(content, path)| format!("## {}\n```rust\n{}\n```", path.display(), content))
             .collect::<Vec<_>>()
             .join("\n");
 
@@ -422,7 +365,7 @@ impl DevToolsServer {
             ) else {
                 continue;
             };
-            contents.push_str(&format!("## {}\n```\n{}\n```\n", reference.uri, lines));
+            contents.push_str(&format!("## {}\n```rust\n{}\n```\n", reference.uri, lines));
         }
 
         let result = CallToolResult::success(vec![Content::text(contents)]);
@@ -506,8 +449,53 @@ impl DevToolsServer {
 impl ServerHandler for DevToolsServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
+            protocol_version: ProtocolVersion::default(),
+            server_info: Implementation {
+                name: "cursor_rust_tools".to_string(),
+                version: "0.1.0".to_string(),
+            },
+            instructions: Some(GUIDANCE_PROMPT.to_string()),
             ..Default::default()
+        }
+    }
+
+    fn list_prompts(
+        &self,
+        _request: Option<PaginatedRequestParam>,
+        _context: RequestContext<RoleServer>,
+    ) -> impl std::future::Future<Output = Result<ListPromptsResult, rmcp::Error>> + Send + '_ {
+        std::future::ready(Ok(ListPromptsResult {
+            prompts: vec![
+                Prompt {
+                    name: "rust_development_guidance".to_string(),
+                    description: Some("Comprehensive guidance for Rust development using rust-devtools-mcp".to_string()),
+                    arguments: None,
+                },
+            ],
+            next_cursor: None,
+        }))
+    }
+
+    fn get_prompt(
+        &self,
+        request: GetPromptRequestParam,
+        _context: RequestContext<RoleServer>,
+    ) -> impl std::future::Future<Output = Result<GetPromptResult, rmcp::Error>> + Send + '_ {
+        match request.name.as_str() {
+            "rust_development_guidance" => {
+                std::future::ready(Ok(GetPromptResult {
+                    description: Some("Guidance for using Rust development tools effectively".to_string()),
+                    messages: vec![
+                        PromptMessage {
+                            role: PromptMessageRole::User,
+                            content: PromptMessageContent::Text {
+                                text: GUIDANCE_PROMPT.to_string(),
+                            },
+                        },
+                    ],
+                }))
+            }
+            _ => std::future::ready(Err(rmcp::Error::internal_error(format!("Unknown prompt: {}", request.name), None))),
         }
     }
 }

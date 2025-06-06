@@ -134,12 +134,6 @@ impl RustAnalyzerLsp {
             .context("Sending Initialized notification failed")?;
 
         info!("Waiting for rust-analyzer indexing...");
-        let rx = client.indexed_rx.lock().await.clone();
-        tokio::spawn(async move {
-            while let Ok(()) = rx.recv_async().await {
-                info!("rust-analyzer indexing finished.");
-            }
-        });
 
         Ok(client)
     }

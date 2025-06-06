@@ -38,18 +38,6 @@ impl Project {
             .map_err(|_| anyhow::anyhow!("Failed to create project root URI"))
     }
 
-    pub fn docs_dir(&self) -> PathBuf {
-        self.cache_dir().join("doc")
-    }
-
-    pub fn cache_folder(&self) -> &str {
-        ".docs-cache"
-    }
-
-    pub fn cache_dir(&self) -> PathBuf {
-        self.root.join(self.cache_folder())
-    }
-
     pub fn file_uri(&self, relative_path: impl AsRef<Path>) -> Result<Url> {
         Url::from_file_path(self.root.join(relative_path))
             .map_err(|_| anyhow::anyhow!("Failed to create file URI"))
