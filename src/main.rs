@@ -106,6 +106,8 @@ enum ProjectCommands {
     /// List all projects currently in the workspace
     #[command(alias = "ls")]
     List,
+    /// Clear all projects from the workspace
+    Clear,
 }
 
 #[derive(Parser, Debug)]
@@ -391,6 +393,22 @@ async fn handle_projects(command: ProjectCommands, config_path: PathBuf) -> Resu
                         .unwrap_or("<unknown>");
                     println!("  • {} {}", name, beautify_path(&project.root));
                 }
+            }
+        }
+        ProjectCommands::Clear => {
+            if config.projects.is_empty() {
+                println!("📭 No projects found in the workspace. Nothing to clear.");
+            } else {
+                let project_count = config.projects.len();
+                println!("🧹 Clearing {} project(s) from workspace...", project_count);
+                
+                config.projects.clear();
+                
+                // Save config
+                let content = toml::to_string_pretty(&config)?;
+                fs::write(&config_path, content)?;
+                
+                println!("✅ All projects successfully cleared from workspace!");
             }
         }
     }
