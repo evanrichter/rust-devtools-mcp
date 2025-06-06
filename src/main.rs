@@ -83,9 +83,17 @@ enum Commands {
 
 #[derive(Parser, Debug)]
 struct ServeArgs {
-    /// Port to run the SSE server on
+    /// Port to run the server on
     #[arg(short, long, default_value_t = 4000)]
     port: u16,
+    
+    /// Transport mode to use
+    #[arg(short, long, default_value = "streamable-http")]
+    transport: String,
+    
+    /// Host to bind to
+    #[arg(long, default_value = "localhost")]
+    host: String,
 }
 
 #[derive(Subcommand, Debug)]
@@ -115,6 +123,14 @@ struct ConfigArgs {
     /// Port to use when generating MCP config (should match serve port)
     #[arg(short, long, default_value_t = 4000)]
     port: u16,
+    
+    /// Transport mode to use for config generation
+    #[arg(short, long, default_value = "streamable-http")]
+    transport: String,
+    
+    /// Host to use for config generation
+    #[arg(long, default_value = "localhost")]
+    host: String,
 }
 
 #[tokio::main]
@@ -148,7 +164,25 @@ async fn run_serve(args: ServeArgs, config_path: PathBuf) -> Result<()> {
     info!("run_serve: Starting function");
     let (sender, receiver) = flume::unbounded();
     info!("run_serve: Created channels");
-    let context = ContextType::new(args.port, config_path, sender).await;
+    
+    // Parse transport type
+    let transport = match args.transport.as_str() {
+        "stdio" => crate::project::TransportType::Stdio,
+        "sse" => crate::project::TransportType::Sse {
+            host: args.host.clone(),
+            port: args.port,
+        },
+        "streamable-http" => crate::project::TransportType::StreamableHttp {
+            host: args.host.clone(),
+            port: args.port,
+        },
+        _ => {
+            error!("Invalid transport type: {}. Valid options: stdio, sse, streamable-http", args.transport);
+            return Err(anyhow::anyhow!("Invalid transport type: {}", args.transport));
+        }
+    };
+    
+    let context = ContextType::new(transport, config_path, sender).await;
     info!("run_serve: Created context");
     context.load_config().await?;
     info!("run_serve: Loaded config");
@@ -426,7 +460,25 @@ async fn handle_projects(command: ProjectCommands, config_path: PathBuf) -> Resu
 async fn handle_config(args: ConfigArgs, config_path: PathBuf) -> Result<()> {
     // We don't need a real notifier for config display
     let (sender, _) = flume::unbounded();
-    let context = ContextType::new(args.port, config_path.clone(), sender).await;
+    
+    // Parse transport type
+    let transport = match args.transport.as_str() {
+        "stdio" => crate::project::TransportType::Stdio,
+        "sse" => crate::project::TransportType::Sse {
+            host: args.host.clone(),
+            port: args.port,
+        },
+        "streamable-http" => crate::project::TransportType::StreamableHttp {
+            host: args.host.clone(),
+            port: args.port,
+        },
+        _ => {
+            error!("Invalid transport type: {}. Valid options: stdio, sse, streamable-http", args.transport);
+            return Err(anyhow::anyhow!("Invalid transport type: {}", args.transport));
+        }
+    };
+    
+    let context = ContextType::new(transport, config_path.clone(), sender).await;
 
     println!("⚙️  Configuration file: {}", beautify_path(&config_path));
     println!("📋 MCP Configuration for Cursor (.cursor/mcp.json):");

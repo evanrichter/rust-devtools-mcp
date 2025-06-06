@@ -122,7 +122,7 @@ impl ContextNotification {
     }
 }
 
-const HOSTNAME: &str = "localhost";
+
 
 #[derive(Debug)]
 pub struct ProjectContext {
@@ -144,7 +144,7 @@ pub struct Context {
 
 impl Context {
     pub async fn new(
-        port: u16,
+        transport: TransportType,
         config_path: PathBuf,
         notifier: Sender<ContextNotification>,
     ) -> Self {
@@ -182,10 +182,7 @@ impl Context {
 
         Self {
             projects,
-            transport: TransportType::StreamableHttp {
-                host: HOSTNAME.to_string(),
-                port,
-            },
+            transport,
             lsp_sender,
             mcp_sender,
             notifier,
@@ -203,7 +200,14 @@ impl Context {
 
     pub fn mcp_configuration(&self) -> String {
         let (host, port) = self.address_information();
-        CONFIG_TEMPLATE
+        
+        let template = match &self.transport {
+            TransportType::Stdio => CONFIG_TEMPLATE_STDIO,
+            TransportType::Sse { .. } => CONFIG_TEMPLATE_SSE,
+            TransportType::StreamableHttp { .. } => CONFIG_TEMPLATE_STREAMABLE_HTTP,
+        };
+        
+        template
             .replace("{{HOST}}", &host)
             .replace("{{PORT}}", &port.to_string())
     }
@@ -429,14 +433,32 @@ impl Context {
     }
 }
 
-const CONFIG_TEMPLATE: &str = r#"
+const CONFIG_TEMPLATE_SSE: &str = r#"
 {
     "mcpServers": {
         "rust-devtools-mcp": {
-            "url": "http://{{HOST}}:{{PORT}}/sse",
-            "env": {
-                "API_KEY": ""
-            }
+            "url": "http://{{HOST}}:{{PORT}}/sse"
+        }
+    }
+}
+"#;
+
+const CONFIG_TEMPLATE_STREAMABLE_HTTP: &str = r#"
+{
+    "mcpServers": {
+        "rust-devtools-mcp": {
+            "url": "http://{{HOST}}:{{PORT}}/mcp"
+        }
+    }
+}
+"#;
+
+const CONFIG_TEMPLATE_STDIO: &str = r#"
+{
+    "mcpServers": {
+        "rust-devtools-mcp": {
+            "command": "rust-devtools-mcp",
+            "args": ["serve", "--transport", "stdio"]
         }
     }
 }
