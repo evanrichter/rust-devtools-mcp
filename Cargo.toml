@@ -43,3 +43,7 @@ shellexpand = "3.1"
 notify-debouncer-mini = "0.6"
 clap = { version = "4.5", features = ["derive"] }
 dashmap = "6.1"
+
+[profile.release]
+debug = "limited"
+lto = "thin"
