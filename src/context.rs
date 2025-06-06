@@ -363,6 +363,35 @@ impl Context {
         Ok(())
     }
 
+    /// Find a project by name (directory name)
+    pub async fn find_project_by_name(&self, name: &str) -> Option<PathBuf> {
+        for entry in self.projects.iter() {
+            let root = entry.key();
+            if let Some(dir_name) = root.file_name() {
+                if dir_name.to_string_lossy() == name {
+                    return Some(root.clone());
+                }
+            }
+        }
+        None
+    }
+
+    /// Remove a project from the context by path or name
+    pub async fn remove_project_by_path_or_name(&self, path_or_name: &str) -> Option<Arc<ProjectContext>> {
+        // First try to find by name
+        if let Some(root) = self.find_project_by_name(path_or_name).await {
+            return self.remove_project(&root).await;
+        }
+        
+        // Then try to interpret as a path
+        let path = PathBuf::from(shellexpand::tilde(path_or_name).to_string());
+        if let Ok(canonical_path) = path.canonicalize() {
+            return self.remove_project(&canonical_path).await;
+        }
+        
+        None
+    }
+
     /// Remove a project from the context
     pub async fn remove_project(&self, root: &PathBuf) -> Option<Arc<ProjectContext>> {
         let project = self.projects.remove(root).map(|(_, v)| v);

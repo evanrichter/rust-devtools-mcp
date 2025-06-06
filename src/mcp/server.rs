@@ -110,25 +110,23 @@ impl DevToolsServer {
 
     #[tool(
         name = "remove_project",
-        description = "Remove a project from the workspace by specifying its root path"
+        description = "Remove a project from the workspace by specifying its root path or project name"
     )]
     async fn remove_project(
         &self,
         #[tool(param)]
-        #[schemars(description = "The root path of the project to remove")]
+        #[schemars(description = "The root path or project name to remove")]
         project_path: String,
     ) -> Result<CallToolResult, rmcp::Error> {
-        let path = PathBuf::from(shellexpand::tilde(&project_path).to_string());
-
-        match self.context.remove_project(&path).await {
+        match self.context.remove_project_by_path_or_name(&project_path).await {
             Some(_) => {
-                let message = format!("Successfully removed project: {}", path.display());
+                let message = format!("Successfully removed project: {}", project_path);
                 Ok(CallToolResult::success(vec![Content::text(message)]))
             }
             #[allow(non_snake_case)]
             None => Ok(CallToolResult::error(vec![Content::text(format!(
-                "Project not found: {}",
-                path.display()
+                "Project not found: '{}'. Use 'list_projects' to see available projects.",
+                project_path
             ))])),
         }
     }

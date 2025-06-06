@@ -107,9 +107,9 @@ enum ProjectCommands {
     /// Remove a project from the workspace
     #[command(alias = "rm")]
     Remove {
-        /// The root path of the project to remove
+        /// The root path or project name to remove
         #[arg(required = true)]
-        path: PathBuf,
+        path_or_name: String,
     },
     /// List all projects currently in the workspace
     #[command(alias = "ls")]
@@ -408,17 +408,47 @@ async fn handle_projects(command: ProjectCommands, config_path: PathBuf) -> Resu
 
             println!("🎉 Project successfully added to workspace!");
         }
-        ProjectCommands::Remove { path } => {
-            let absolute_path = path.canonicalize()?;
-            println!("🗑️  Removing project: {}", beautify_path(&absolute_path));
+        ProjectCommands::Remove { path_or_name } => {
+            // Try to find project by name first, then by path
+            let mut found_project = None;
+            let mut project_to_remove = None;
 
-            if config.projects.remove(&absolute_path).is_some() {
-                // Save config
-                let content = toml::to_string_pretty(&config)?;
-                fs::write(&config_path, content)?;
-                println!("✅ Project successfully removed from workspace!");
+            // First, try to interpret as a project name
+            for (root, project) in &config.projects {
+                let name = root
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("");
+                if name == path_or_name {
+                     found_project = Some((root.clone(), project));
+                     project_to_remove = Some(root.clone());
+                     break;
+                 }
+            }
+
+            // If not found by name, try to interpret as a path
+            if found_project.is_none() {
+                if let Ok(path) = PathBuf::from(&path_or_name).canonicalize() {
+                     if config.projects.contains_key(&path) {
+                         found_project = Some((path.clone(), &config.projects[&path]));
+                         project_to_remove = Some(path);
+                     }
+                 }
+            }
+
+            if let Some((root, _)) = found_project {
+                println!("🗑️  Removing project: {}", beautify_path(&root));
+                
+                if let Some(path_to_remove) = project_to_remove {
+                    config.projects.remove(&path_to_remove);
+                    // Save config
+                    let content = toml::to_string_pretty(&config)?;
+                    fs::write(&config_path, content)?;
+                    println!("✅ Project successfully removed from workspace!");
+                }
             } else {
-                println!("⚠️  Project not found: {}", beautify_path(&absolute_path));
+                println!("⚠️  Project not found: '{}'", path_or_name);
+                println!("💡 Use 'rust-devtools-mcp projects list' to see available projects");
             }
         }
         ProjectCommands::List => {
