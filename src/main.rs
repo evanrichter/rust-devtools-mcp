@@ -92,7 +92,7 @@ struct ServeArgs {
     transport: String,
 
     /// Host to bind to
-    #[arg(long, default_value = "localhost")]
+    #[arg(long, default_value = "127.0.0.1")]
     host: String,
 }
 
@@ -129,7 +129,7 @@ struct ConfigArgs {
     transport: String,
 
     /// Host to use for config generation
-    #[arg(long, default_value = "localhost")]
+    #[arg(long, default_value = "127.0.0.1")]
     host: String,
 }
 

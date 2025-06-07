@@ -1,6 +1,7 @@
 mod server;
 mod utils;
 
+use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use crate::context::Context;
@@ -20,14 +21,14 @@ pub(super) enum McpNotification {
 
 pub async fn run_server(context: Context) -> Result<()> {
     let dev_tools_server = DevToolsServer::new(context.clone());
-
+    tracing::info!("Starting server with transport: {:?}", context.transport());
     match context.transport() {
         TransportType::Stdio => {
             let service = dev_tools_server.serve(stdio()).await?;
             service.waiting().await?;
         }
         TransportType::Sse { host, port } => {
-            let addr = format!("{}:{}", host, port).parse()?;
+            let addr: SocketAddr = format!("{}:{}", host, port).parse()?;
             let sse_server = SseServer::serve(addr).await?;
             // with_service takes a factory, so we clone context for each new connection
             let cancel_token =
@@ -36,7 +37,7 @@ pub async fn run_server(context: Context) -> Result<()> {
         }
         TransportType::StreamableHttp { host, port } => {
             use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
-            let addr = format!("{}:{}", host, port);
+            let addr: SocketAddr = format!("{}:{}", host, port).parse()?;
 
             let service = streamable_http_server::StreamableHttpService::new(
                 move || DevToolsServer::new(context.clone()),
@@ -45,7 +46,7 @@ pub async fn run_server(context: Context) -> Result<()> {
             );
 
             let router = axum::Router::new().nest_service("/mcp", service);
-            let tcp_listener = tokio::net::TcpListener::bind(&addr).await?;
+            let tcp_listener = tokio::net::TcpListener::bind(addr).await?;
             tracing::info!("StreamableHttp server listening on {}", addr);
             if let Err(e) = axum::serve(tcp_listener, router)
                 .with_graceful_shutdown(async { tokio::signal::ctrl_c().await.unwrap() })
