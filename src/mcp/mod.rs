@@ -17,6 +17,10 @@ pub(super) enum McpNotification {
         content: CallToolResult,
         project: PathBuf,
     },
+    CodeActionsUpdated {
+        project: PathBuf,
+        action_count: usize,
+    },
 }
 
 pub async fn run_server(context: Context) -> Result<()> {

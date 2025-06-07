@@ -37,6 +37,7 @@ impl ContextNotification {
         match self {
             ContextNotification::Lsp(LspNotification::Indexing { project, .. }) => project.clone(),
             ContextNotification::Mcp(McpNotification::Response { project, .. }) => project.clone(),
+            ContextNotification::Mcp(McpNotification::CodeActionsUpdated { project, .. }) => project.clone(),
             ContextNotification::ProjectAdded(project) => project.clone(),
             ContextNotification::ProjectRemoved(project) => project.clone(),
             ContextNotification::ProjectDescriptions(_) => PathBuf::from("project_descriptions"),
@@ -91,6 +92,9 @@ impl ContextNotification {
             }
             ContextNotification::Mcp(McpNotification::Response { content, .. }) => {
                 format!("MCP Response: {:?}", content)
+            }
+            ContextNotification::Mcp(McpNotification::CodeActionsUpdated { project, action_count }) => {
+                format!("Code actions updated for project {:?}: {} actions available", project, action_count)
             }
             ContextNotification::ProjectAdded(_) => "Project Added".to_string(),
             ContextNotification::ProjectRemoved(_) => "Project Removed".to_string(),

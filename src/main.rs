@@ -73,22 +73,22 @@ struct Cli {
 #[derive(Subcommand, Debug)]
 enum Commands {
     /// Start the MCP server and listen for requests
-    Serve(ServeArgs),
+    Serve(ServerConfig),
     /// Manage projects in the workspace
     #[command(subcommand)]
     Projects(ProjectCommands),
     /// Show configuration information
-    Config(ConfigArgs),
+    Config(ServerConfig),
 }
 
 #[derive(Parser, Debug)]
-struct ServeArgs {
+struct ServerConfig {
     /// Port to run the server on
     #[arg(short, long, default_value_t = 4000)]
     port: u16,
 
     /// Transport mode to use
-    #[arg(short, long, default_value = "streamable-http")]
+    #[arg(short, long, default_value = "sse")]
     transport: String,
 
     /// Host to bind to
@@ -118,20 +118,7 @@ enum ProjectCommands {
     Clear,
 }
 
-#[derive(Parser, Debug)]
-struct ConfigArgs {
-    /// Port to use when generating MCP config (should match serve port)
-    #[arg(short, long, default_value_t = 4000)]
-    port: u16,
 
-    /// Transport mode to use for config generation
-    #[arg(short, long, default_value = "streamable-http")]
-    transport: String,
-
-    /// Host to use for config generation
-    #[arg(long, default_value = "127.0.0.1")]
-    host: String,
-}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -160,7 +147,7 @@ async fn main() -> Result<()> {
     }
 }
 
-async fn run_serve(args: ServeArgs, config_path: PathBuf) -> Result<()> {
+async fn run_serve(args: ServerConfig, config_path: PathBuf) -> Result<()> {
     info!("run_serve: Starting function");
     let (sender, receiver) = flume::unbounded();
     info!("run_serve: Created channels");
@@ -228,7 +215,7 @@ async fn run_serve(args: ServeArgs, config_path: PathBuf) -> Result<()> {
         );
         if context.project_descriptions().await.is_empty() {
             warn!(
-                "No projects found. Once connected, add one using the 'add_project' tool or the CLI: `rust-devtools-mcp projects add <path>`"
+                "No projects found. Once connected, add one using the 'manage_projects' tool with add_project_path parameter or the CLI: `rust-devtools-mcp projects add <path>`"
             );
         }
         info!(
@@ -490,7 +477,7 @@ async fn handle_projects(command: ProjectCommands, config_path: PathBuf) -> Resu
     Ok(())
 }
 
-async fn handle_config(args: ConfigArgs, config_path: PathBuf) -> Result<()> {
+async fn handle_config(args: ServerConfig, config_path: PathBuf) -> Result<()> {
     // We don't need a real notifier for config display
     let (sender, _) = flume::unbounded();
 
