@@ -31,6 +31,8 @@ pub struct CompilerMessageSpan {
     pub file_name: String,
     pub line_start: usize,
     pub line_end: usize,
+    // This field is crucial for identifying the main source of an error.
+    pub is_primary: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -74,18 +76,31 @@ impl CargoRemote {
         Ok((messages, test_messages))
     }
 
-    pub async fn check(&self, only_errors: bool) -> Result<Vec<String>> {
+    /// Runs `cargo check` and returns a human-readable list of rendered diagnostic messages.
+    pub async fn check_rendered(&self) -> Result<Vec<String>> {
+        let diagnostics = self.check_structured().await?;
+        Ok(diagnostics.into_iter().map(|d| d.rendered).collect())
+    }
+
+    /// Runs `cargo check` with JSON output and returns structured diagnostics.
+    /// This is the preferred method for programmatic analysis.
+    pub async fn check_structured(&self) -> Result<Vec<CompilerMessage>> {
         let (messages, _) = self
             .run_cargo_command(&["check", "--message-format=json"], false)
             .await?;
+
         Ok(messages
             .into_iter()
             .filter_map(|message| match message {
                 CargoMessage::CompilerMessage { message } => {
-                    if only_errors && message.level != "error" {
-                        return None;
+                    // We only care about diagnostics that have code locations.
+                    if (message.level == "error" || message.level == "warning")
+                        && !message.spans.is_empty()
+                    {
+                        Some(message)
+                    } else {
+                        None
                     }
-                    Some(message.rendered)
                 }
                 _ => None,
             })

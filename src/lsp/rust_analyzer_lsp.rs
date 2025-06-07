@@ -8,13 +8,16 @@ use async_lsp::panic::CatchUnwindLayer;
 use async_lsp::server::LifecycleLayer;
 use async_lsp::tracing::TracingLayer;
 use async_lsp::{LanguageServer, ServerSocket};
-use lsp_types::request::GotoTypeDefinitionParams;
+use lsp_types::request::{CodeActionRequest, Rename, WorkspaceSymbolRequest};
 use lsp_types::{
-    ClientCapabilities, DidOpenTextDocumentParams, DocumentSymbolClientCapabilities,
-    GotoDefinitionResponse, Hover, HoverClientCapabilities, HoverParams, InitializeParams,
-    InitializedParams, Location, MarkupKind, Position, ReferenceContext, ReferenceParams,
-    TextDocumentClientCapabilities, TextDocumentIdentifier, TextDocumentItem,
-    TextDocumentPositionParams, WindowClientCapabilities, WorkDoneProgressParams, WorkspaceFolder,
+    ClientCapabilities, CodeActionClientCapabilities, CodeActionContext, CodeActionLiteralSupport,
+    CodeActionParams, CodeActionResponse, DidOpenTextDocumentParams,
+    DocumentSymbolClientCapabilities, Hover, HoverClientCapabilities, HoverParams,
+    InitializeParams, InitializedParams, Location, MarkupKind, Position, Range, ReferenceContext,
+    ReferenceParams, RenameParams, TextDocumentClientCapabilities, TextDocumentIdentifier,
+    TextDocumentItem, TextDocumentPositionParams, Url, WindowClientCapabilities,
+    WorkDoneProgressParams, WorkspaceEdit, WorkspaceEditClientCapabilities, WorkspaceFolder,
+    WorkspaceSymbolClientCapabilities, WorkspaceSymbolParams,
 };
 use serde_json::json;
 use tokio::sync::Mutex;
@@ -98,6 +101,17 @@ impl RustAnalyzerLsp {
                     name: "root".into(),
                 }]),
                 capabilities: ClientCapabilities {
+                    workspace: Some(lsp_types::WorkspaceClientCapabilities {
+                        symbol: Some(WorkspaceSymbolClientCapabilities {
+                            dynamic_registration: Some(false),
+                            ..Default::default()
+                        }),
+                        workspace_edit: Some(WorkspaceEditClientCapabilities {
+                            document_changes: Some(true),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }),
                     window: Some(WindowClientCapabilities {
                         work_done_progress: Some(true), // Required for indexing progress
                         ..WindowClientCapabilities::default()
@@ -111,6 +125,31 @@ impl RustAnalyzerLsp {
                         hover: Some(HoverClientCapabilities {
                             content_format: Some(vec![MarkupKind::Markdown]),
                             ..HoverClientCapabilities::default()
+                        }),
+                        code_action: Some(CodeActionClientCapabilities {
+                            code_action_literal_support: Some(CodeActionLiteralSupport {
+                                code_action_kind: lsp_types::CodeActionKindLiteralSupport {
+                                    value_set: vec![
+                                        lsp_types::CodeActionKind::EMPTY.as_str().to_string(),
+                                        lsp_types::CodeActionKind::QUICKFIX.as_str().to_string(),
+                                        lsp_types::CodeActionKind::REFACTOR.as_str().to_string(),
+                                        lsp_types::CodeActionKind::REFACTOR_EXTRACT
+                                            .as_str()
+                                            .to_string(),
+                                        lsp_types::CodeActionKind::REFACTOR_INLINE
+                                            .as_str()
+                                            .to_string(),
+                                        lsp_types::CodeActionKind::REFACTOR_REWRITE
+                                            .as_str()
+                                            .to_string(),
+                                        lsp_types::CodeActionKind::SOURCE.as_str().to_string(),
+                                        lsp_types::CodeActionKind::SOURCE_ORGANIZE_IMPORTS
+                                            .as_str()
+                                            .to_string(),
+                                    ],
+                                },
+                            }),
+                            ..Default::default()
                         }),
                         ..TextDocumentClientCapabilities::default()
                     }),
@@ -152,8 +191,10 @@ impl RustAnalyzerLsp {
             .context("Sending Exit notification failed")?;
 
         // Wait for the mainloop to finish. This implicitly waits for the process to exit.
-        if let Err(e) = self.mainloop_handle.lock().await.take().unwrap().await {
-            tracing::error!("Error joining LSP mainloop task: {:?}", e);
+        if let Some(handle) = self.mainloop_handle.lock().await.take() {
+            if let Err(e) = handle.await {
+                tracing::error!("Error joining LSP mainloop task: {:?}", e);
+            }
         }
 
         Ok(())
@@ -185,10 +226,11 @@ impl RustAnalyzerLsp {
 
     pub async fn hover(
         &self,
-        relative_path: impl AsRef<Path>,
+        file_path: impl AsRef<Path>,
         position: Position,
     ) -> Result<Option<Hover>> {
-        let uri = self.project.file_uri(relative_path)?;
+        let uri = Url::from_file_path(file_path.as_ref())
+            .map_err(|_| anyhow::anyhow!("Failed to create file URI from path"))?;
         self.server
             .lock()
             .await
@@ -203,33 +245,13 @@ impl RustAnalyzerLsp {
             .context("Hover request failed")
     }
 
-    pub async fn type_definition(
-        &self,
-        relative_path: impl AsRef<Path>,
-        position: Position,
-    ) -> Result<Option<GotoDefinitionResponse>> {
-        let uri = self.project.file_uri(relative_path)?;
-        self.server
-            .lock()
-            .await
-            .type_definition(GotoTypeDefinitionParams {
-                text_document_position_params: TextDocumentPositionParams {
-                    text_document: TextDocumentIdentifier { uri },
-                    position,
-                },
-                work_done_progress_params: WorkDoneProgressParams::default(),
-                partial_result_params: Default::default(),
-            })
-            .await
-            .context("Type definition request failed")
-    }
-
     pub async fn find_references(
         &self,
-        relative_path: impl AsRef<Path>,
+        file_path: impl AsRef<Path>,
         position: Position,
     ) -> Result<Option<Vec<Location>>> {
-        let uri = self.project.file_uri(relative_path)?;
+        let uri = Url::from_file_path(file_path.as_ref())
+            .map_err(|_| anyhow::anyhow!("Failed to create file URI from path"))?;
         self.server
             .lock()
             .await
@@ -248,29 +270,63 @@ impl RustAnalyzerLsp {
             .context("References request failed")
     }
 
-    pub async fn document_symbols(
+    pub async fn workspace_symbols(
         &self,
-        relative_path: impl AsRef<Path>,
-    ) -> Result<Option<Vec<lsp_types::SymbolInformation>>> {
-        let uri = self.project.file_uri(relative_path)?;
-        let o = self
-            .server
+        query: String,
+    ) -> Result<Option<lsp_types::WorkspaceSymbolResponse>> {
+        self.server
             .lock()
             .await
-            .document_symbol(lsp_types::DocumentSymbolParams {
-                text_document: TextDocumentIdentifier { uri },
-                work_done_progress_params: WorkDoneProgressParams::default(),
+            .request::<WorkspaceSymbolRequest>(WorkspaceSymbolParams {
+                query,
+                work_done_progress_params: Default::default(),
                 partial_result_params: Default::default(),
             })
             .await
-            .context("Document symbols request failed")?
-            .and_then(|symbols| match symbols {
-                lsp_types::DocumentSymbolResponse::Flat(f) => Some(f),
-                lsp_types::DocumentSymbolResponse::Nested(_) => {
-                    tracing::error!("Only support flat symbols for now");
-                    None
-                }
-            });
-        Ok(o)
+            .context("Workspace symbols request failed")
+    }
+
+    pub async fn code_actions(
+        &self,
+        file_path: impl AsRef<Path>,
+        range: Range,
+    ) -> Result<Option<CodeActionResponse>> {
+        let uri = Url::from_file_path(file_path.as_ref())
+            .map_err(|_| anyhow::anyhow!("Failed to create file URI from path"))?;
+        self.server
+            .lock()
+            .await
+            .request::<CodeActionRequest>(CodeActionParams {
+                text_document: TextDocumentIdentifier { uri },
+                range,
+                context: CodeActionContext::default(),
+                work_done_progress_params: Default::default(),
+                partial_result_params: Default::default(),
+            })
+            .await
+            .context("Code action request failed")
+    }
+
+    pub async fn rename(
+        &self,
+        file_path: impl AsRef<Path>,
+        position: Position,
+        new_name: String,
+    ) -> Result<Option<WorkspaceEdit>> {
+        let uri = Url::from_file_path(file_path.as_ref())
+            .map_err(|_| anyhow::anyhow!("Failed to create file URI from path"))?;
+        self.server
+            .lock()
+            .await
+            .request::<Rename>(RenameParams {
+                text_document_position: TextDocumentPositionParams {
+                    text_document: TextDocumentIdentifier { uri },
+                    position,
+                },
+                new_name,
+                work_done_progress_params: Default::default(),
+            })
+            .await
+            .context("Rename request failed")
     }
 }

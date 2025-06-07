@@ -86,11 +86,11 @@ struct ServeArgs {
     /// Port to run the server on
     #[arg(short, long, default_value_t = 4000)]
     port: u16,
-    
+
     /// Transport mode to use
     #[arg(short, long, default_value = "streamable-http")]
     transport: String,
-    
+
     /// Host to bind to
     #[arg(long, default_value = "localhost")]
     host: String,
@@ -123,11 +123,11 @@ struct ConfigArgs {
     /// Port to use when generating MCP config (should match serve port)
     #[arg(short, long, default_value_t = 4000)]
     port: u16,
-    
+
     /// Transport mode to use for config generation
     #[arg(short, long, default_value = "streamable-http")]
     transport: String,
-    
+
     /// Host to use for config generation
     #[arg(long, default_value = "localhost")]
     host: String,
@@ -164,7 +164,7 @@ async fn run_serve(args: ServeArgs, config_path: PathBuf) -> Result<()> {
     info!("run_serve: Starting function");
     let (sender, receiver) = flume::unbounded();
     info!("run_serve: Created channels");
-    
+
     // Parse transport type
     let transport = match args.transport.as_str() {
         "stdio" => crate::project::TransportType::Stdio,
@@ -177,11 +177,17 @@ async fn run_serve(args: ServeArgs, config_path: PathBuf) -> Result<()> {
             port: args.port,
         },
         _ => {
-            error!("Invalid transport type: {}. Valid options: stdio, sse, streamable-http", args.transport);
-            return Err(anyhow::anyhow!("Invalid transport type: {}", args.transport));
+            error!(
+                "Invalid transport type: {}. Valid options: stdio, sse, streamable-http",
+                args.transport
+            );
+            return Err(anyhow::anyhow!(
+                "Invalid transport type: {}",
+                args.transport
+            ));
         }
     };
-    
+
     let context = ContextType::new(transport, config_path, sender).await;
     info!("run_serve: Created context");
     context.load_config().await?;
@@ -415,30 +421,27 @@ async fn handle_projects(command: ProjectCommands, config_path: PathBuf) -> Resu
 
             // First, try to interpret as a project name
             for (root, project) in &config.projects {
-                let name = root
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("");
+                let name = root.file_name().and_then(|n| n.to_str()).unwrap_or("");
                 if name == path_or_name {
-                     found_project = Some((root.clone(), project));
-                     project_to_remove = Some(root.clone());
-                     break;
-                 }
+                    found_project = Some((root.clone(), project));
+                    project_to_remove = Some(root.clone());
+                    break;
+                }
             }
 
             // If not found by name, try to interpret as a path
             if found_project.is_none() {
                 if let Ok(path) = PathBuf::from(&path_or_name).canonicalize() {
-                     if config.projects.contains_key(&path) {
-                         found_project = Some((path.clone(), &config.projects[&path]));
-                         project_to_remove = Some(path);
-                     }
-                 }
+                    if config.projects.contains_key(&path) {
+                        found_project = Some((path.clone(), &config.projects[&path]));
+                        project_to_remove = Some(path);
+                    }
+                }
             }
 
             if let Some((root, _)) = found_project {
                 println!("🗑️  Removing project: {}", beautify_path(&root));
-                
+
                 if let Some(path_to_remove) = project_to_remove {
                     config.projects.remove(&path_to_remove);
                     // Save config
@@ -490,7 +493,7 @@ async fn handle_projects(command: ProjectCommands, config_path: PathBuf) -> Resu
 async fn handle_config(args: ConfigArgs, config_path: PathBuf) -> Result<()> {
     // We don't need a real notifier for config display
     let (sender, _) = flume::unbounded();
-    
+
     // Parse transport type
     let transport = match args.transport.as_str() {
         "stdio" => crate::project::TransportType::Stdio,
@@ -503,11 +506,17 @@ async fn handle_config(args: ConfigArgs, config_path: PathBuf) -> Result<()> {
             port: args.port,
         },
         _ => {
-            error!("Invalid transport type: {}. Valid options: stdio, sse, streamable-http", args.transport);
-            return Err(anyhow::anyhow!("Invalid transport type: {}", args.transport));
+            error!(
+                "Invalid transport type: {}. Valid options: stdio, sse, streamable-http",
+                args.transport
+            );
+            return Err(anyhow::anyhow!(
+                "Invalid transport type: {}",
+                args.transport
+            ));
         }
     };
-    
+
     let context = ContextType::new(transport, config_path.clone(), sender).await;
 
     println!("⚙️  Configuration file: {}", beautify_path(&config_path));

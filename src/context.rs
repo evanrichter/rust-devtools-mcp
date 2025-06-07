@@ -36,7 +36,6 @@ impl ContextNotification {
     pub fn notification_path(&self) -> PathBuf {
         match self {
             ContextNotification::Lsp(LspNotification::Indexing { project, .. }) => project.clone(),
-            ContextNotification::Mcp(McpNotification::Request { project, .. }) => project.clone(),
             ContextNotification::Mcp(McpNotification::Response { project, .. }) => project.clone(),
             ContextNotification::ProjectAdded(project) => project.clone(),
             ContextNotification::ProjectRemoved(project) => project.clone(),
@@ -90,9 +89,6 @@ impl ContextNotification {
                     "✅ LSP Indexing: Finished".to_string()
                 }
             }
-            ContextNotification::Mcp(McpNotification::Request { content, .. }) => {
-                format!("MCP Request: {:?}", content)
-            }
             ContextNotification::Mcp(McpNotification::Response { content, .. }) => {
                 format!("MCP Response: {:?}", content)
             }
@@ -121,8 +117,6 @@ impl ContextNotification {
         }
     }
 }
-
-
 
 #[derive(Debug)]
 pub struct ProjectContext {
@@ -200,13 +194,13 @@ impl Context {
 
     pub fn mcp_configuration(&self) -> String {
         let (host, port) = self.address_information();
-        
+
         let template = match &self.transport {
             TransportType::Stdio => CONFIG_TEMPLATE_STDIO,
             TransportType::Sse { .. } => CONFIG_TEMPLATE_SSE,
             TransportType::StreamableHttp { .. } => CONFIG_TEMPLATE_STREAMABLE_HTTP,
         };
-        
+
         template
             .replace("{{HOST}}", &host)
             .replace("{{PORT}}", &port.to_string())
@@ -377,18 +371,22 @@ impl Context {
     }
 
     /// Remove a project from the context by path or name
-    pub async fn remove_project_by_path_or_name(&self, path_or_name: &str) -> Option<Arc<ProjectContext>> {
+    #[allow(dead_code)]
+    pub async fn remove_project_by_path_or_name(
+        &self,
+        path_or_name: &str,
+    ) -> Option<Arc<ProjectContext>> {
         // First try to find by name
         if let Some(root) = self.find_project_by_name(path_or_name).await {
             return self.remove_project(&root).await;
         }
-        
+
         // Then try to interpret as a path
         let path = PathBuf::from(shellexpand::tilde(path_or_name).to_string());
         if let Ok(canonical_path) = path.canonicalize() {
             return self.remove_project(&canonical_path).await;
         }
-        
+
         None
     }
 
@@ -431,6 +429,7 @@ impl Context {
 
     /// Get a reference to a project context by any path within the project
     /// Will traverse up the path hierarchy until it finds a matching project root
+    #[allow(dead_code)]
     pub async fn get_project_by_path(&self, path: &Path) -> Option<Arc<ProjectContext>> {
         let mut current_path = path.to_path_buf();
 

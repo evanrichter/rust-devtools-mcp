@@ -6,16 +6,12 @@ use std::path::PathBuf;
 use crate::context::Context;
 use crate::project::TransportType;
 use anyhow::Result;
-use rmcp::model::{CallToolRequestParam, CallToolResult};
+use rmcp::model::CallToolResult;
 use rmcp::{ServiceExt, transport::SseServer, transport::stdio, transport::streamable_http_server};
 use server::DevToolsServer;
 
 #[derive(Debug, Clone)]
 pub(super) enum McpNotification {
-    Request {
-        content: CallToolRequestParam,
-        project: PathBuf,
-    },
     Response {
         content: CallToolResult,
         project: PathBuf,

@@ -1,96 +1,92 @@
-use crate::context::Context;
-use crate::lsp::{format_marked_string, get_location_contents};
+use crate::context::Context as AppContext;
+use crate::lsp::format_marked_string;
 use crate::mcp::McpNotification;
 use crate::mcp::utils::{
-    RequestExtension, error_response_v2, find_symbol_position_in_file, get_file_lines,
-    get_info_from_request,
+    apply_workspace_edit, error_response, get_file_lines, resolve_symbol_in_project,
 };
-use fuzzt::get_top_n;
-use lsp_types::HoverContents;
-use rmcp::{ServerHandler, model::*, schemars, service::RequestContext, service::RoleServer, tool};
-use std::collections::HashMap;
+use lsp_types::{HoverContents, WorkspaceEdit};
+use rmcp::{
+    ServerHandler, model::*, schemars, service::RequestContext as RmcpRequestContext,
+    service::RoleServer, tool,
+};
+use serde::Serialize;
 use std::path::PathBuf;
 
-// Use include_str! to load the guidance prompt from an external file at compile time.
 const GUIDANCE_PROMPT: &str = include_str!("guidance_prompt.md");
 
 #[derive(Clone)]
 pub struct DevToolsServer {
-    context: Context,
+    context: AppContext,
 }
 
 impl DevToolsServer {
-    pub fn new(context: Context) -> Self {
+    pub fn new(context: AppContext) -> Self {
         Self { context }
     }
 }
 
-// Helper for notifications
-async fn notify_req(ctx: &Context, req: &CallToolRequestParam, path: PathBuf) {
-    tracing::info!("MCP Request for project {}: {}", path.display(), req.name);
-    let _ = ctx
-        .send_mcp_notification(McpNotification::Request {
-            content: req.clone(),
-            project: path,
-        })
-        .await;
-}
-async fn notify_resp(ctx: &Context, resp: &CallToolResult, path: PathBuf) {
-    tracing::info!(
-        "MCP Response for project {}: success={}",
-        path.display(),
-        resp.is_error.is_none()
-    );
+async fn notify_resp(ctx: &AppContext, resp: &CallToolResult, project_path: PathBuf) {
     let _ = ctx
         .send_mcp_notification(McpNotification::Response {
             content: resp.clone(),
-            project: path,
+            project: project_path,
         })
         .await;
+}
+
+#[derive(Serialize)]
+struct Fix {
+    title: String,
+    kind: Option<lsp_types::CodeActionKind>,
+    edit_to_apply: Option<lsp_types::WorkspaceEdit>,
+}
+
+#[derive(Serialize)]
+struct DiagnosticWithFixes {
+    file_path: String,
+    severity: String,
+    message: String,
+    line: usize,
+    character: usize,
+    available_fixes: Vec<Fix>,
 }
 
 #[tool(tool_box)]
 impl DevToolsServer {
     // --- Project Management ---
     #[tool(
-        name = "ensure_project_is_loaded",
-        description = "Ensures a project is loaded into the workspace. If not already present, it will be added. This is safe to call multiple times."
+        name = "add_project",
+        description = "Loads a new Rust project into the workspace by its absolute root path. This is required before other tools can operate on it."
     )]
-    async fn ensure_project_is_loaded(
+    async fn add_project(
         &self,
         #[tool(param)]
         #[schemars(description = "The absolute root path of the project to load.")]
-        project_path: String,
+        path: String,
     ) -> Result<CallToolResult, rmcp::Error> {
-        let path = match PathBuf::from(shellexpand::tilde(&project_path).to_string()).canonicalize()
-        {
+        let canonical_path =
+            match PathBuf::from(shellexpand::tilde(&path).to_string()).canonicalize() {
+                Ok(p) => p,
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Invalid project path '{}': {}",
+                        path, e
+                    ))]));
+                }
+            };
+
+        if self.context.get_project(&canonical_path).await.is_some() {
+            return Ok(CallToolResult::success(vec![Content::text(format!(
+                "Project {} is already loaded.",
+                canonical_path.display()
+            ))]));
+        }
+
+        let project = match crate::project::Project::new(&canonical_path) {
             Ok(p) => p,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Invalid project path '{}': {}",
-                    project_path, e
-                ))]));
-            }
-        };
-
-        // 1. Check if project is already loaded
-        if self.context.get_project(&path).await.is_some() {
-            let message = format!("Project {} is already loaded.", path.display());
-            return Ok(CallToolResult::success(vec![Content::text(message)]));
-        }
-
-        // 2. If not loaded, perform validation and add it
-        if !path.is_dir() {
-            return Ok(CallToolResult::error(vec![Content::text(
-                "Project path must be a directory".to_string(),
-            )]));
-        }
-
-        let project = match crate::project::Project::new(&path) {
-            Ok(p) => p,
-            Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Failed to create project: {}",
+                    "Failed to initialize project: {}",
                     e
                 ))]));
             }
@@ -98,7 +94,10 @@ impl DevToolsServer {
 
         match self.context.add_project(project).await {
             Ok(_) => {
-                let message = format!("Successfully loaded new project: {}", path.display());
+                let message = format!(
+                    "Successfully loaded new project: {}",
+                    canonical_path.display()
+                );
                 Ok(CallToolResult::success(vec![Content::text(message)]))
             }
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
@@ -110,338 +109,423 @@ impl DevToolsServer {
 
     #[tool(
         name = "remove_project",
-        description = "Remove a project from the workspace by specifying its root path or project name"
+        description = "Remove a project from the workspace by its name."
     )]
     async fn remove_project(
         &self,
         #[tool(param)]
-        #[schemars(description = "The root path or project name to remove")]
-        project_path: String,
+        #[schemars(description = "The name of the project to remove (e.g., 'cursor-rust-tools').")]
+        project_name: String,
     ) -> Result<CallToolResult, rmcp::Error> {
-        match self.context.remove_project_by_path_or_name(&project_path).await {
-            Some(_) => {
-                let message = format!("Successfully removed project: {}", project_path);
-                Ok(CallToolResult::success(vec![Content::text(message)]))
-            }
-            #[allow(non_snake_case)]
-            None => Ok(CallToolResult::error(vec![Content::text(format!(
-                "Project not found: '{}'. Use 'list_projects' to see available projects.",
-                project_path
+        let Some(root) = self.context.find_project_by_name(&project_name).await else {
+            return Ok(error_response(&format!(
+                "Project '{}' not found. Use 'list_projects' to see available projects.",
+                project_name
+            )));
+        };
+
+        match self.context.remove_project(&root).await {
+            Some(_) => Ok(CallToolResult::success(vec![Content::text(format!(
+                "Successfully removed project: {}",
+                project_name
             ))])),
+            None => Ok(error_response(&format!(
+                "Failed to remove project '{}', it might have been removed already.",
+                project_name
+            ))),
         }
     }
 
     #[tool(
         name = "list_projects",
-        description = "List all projects currently in the workspace"
+        description = "List all projects currently loaded in the workspace."
     )]
     async fn list_projects(&self) -> Result<CallToolResult, rmcp::Error> {
         let projects = self.context.project_descriptions().await;
 
         if projects.is_empty() {
             return Ok(CallToolResult::success(vec![Content::text(
-                "No projects found in workspace. Use 'ensure_project_is_loaded' to add one."
-                    .to_string(),
+                "No projects loaded. Use 'add_project' to load one.".to_string(),
             )]));
         }
 
-        let mut result = String::from("Projects in workspace:\n");
-        for project in projects {
-            let status = if project.is_indexing_lsp {
-                " (indexing...)"
-            } else {
-                " (ready)"
-            };
-            result.push_str(&format!(
-                "- {} ({}){}\n",
-                project.name,
-                project.root.display(),
-                status
-            ));
-        }
+        let messages = projects
+            .into_iter()
+            .map(|project| {
+                let status = if project.is_indexing_lsp {
+                    " (indexing...)"
+                } else {
+                    " (ready)"
+                };
+                Content::text(format!(
+                    "- {} ({}){}",
+                    project.name,
+                    project.root.display(),
+                    status
+                ))
+            })
+            .collect::<Vec<Content>>();
 
-        Ok(CallToolResult::success(vec![Content::text(result)]))
-    }
-
-    // --- cargo_check ---
-    #[tool(
-        name = "cargo_check",
-        description = "Run the cargo check command in this project. Returns the response in JSON format"
-    )]
-    async fn cargo_check(
-        &self,
-        #[tool(aggr)] args: CallToolRequestParam,
-    ) -> Result<CallToolResult, rmcp::Error> {
-        let file = args.get_file()?;
-        let (project, _, absolute_file) = match get_info_from_request(&self.context, &file).await {
-            Ok(info) => info,
-            Err(e) => return Ok(error_response_v2(&e)),
-        };
-        notify_req(&self.context, &args, absolute_file.clone()).await;
-
-        let only_errors = args
-            .arguments
-            .as_ref()
-            .and_then(|a| a.get("only_errors"))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let messages = project
-            .cargo_remote
-            .check(only_errors)
-            .await
-            .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?;
-
-        let response_message = serde_json::to_string_pretty(&messages)
-            .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?;
-        let result = CallToolResult::success(vec![Content::text(response_message)]);
-        notify_resp(&self.context, &result, absolute_file).await;
+        let result = CallToolResult::success(messages);
         Ok(result)
     }
 
-    // --- cargo_test ---
+    // --- Code Analysis ---
+
     #[tool(
-        name = "cargo_test",
-        description = "Run the cargo test command in this project. Returns the response in JSON format"
+        name = "get_symbol_info",
+        description = "Get comprehensive information (documentation, definition, location) for a symbol within a project."
     )]
-    async fn cargo_test(
+    async fn get_symbol_info(
         &self,
-        #[tool(aggr)] args: CallToolRequestParam,
+        #[tool(param)] project_name: String,
+        #[tool(param)] symbol_name: String,
+        #[tool(param)] file_hint: Option<String>,
     ) -> Result<CallToolResult, rmcp::Error> {
-        let file = args.get_file()?;
-        let (project, _, absolute_file) = match get_info_from_request(&self.context, &file).await {
-            Ok(info) => info,
-            Err(e) => return Ok(error_response_v2(&e)),
+        let Some(project_path) = self.context.find_project_by_name(&project_name).await else {
+            return Ok(error_response(&format!(
+                "Project '{}' not found.",
+                project_name
+            )));
         };
-        notify_req(&self.context, &args, absolute_file.clone()).await;
+        let project = self.context.get_project(&project_path).await.unwrap();
 
-        let test = args
-            .arguments
-            .as_ref()
-            .and_then(|a| a.get("test"))
-            .and_then(|v| v.as_str())
-            .map(String::from);
-        let backtrace = args
-            .arguments
-            .as_ref()
-            .and_then(|a| a.get("backtrace"))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let messages = project
-            .cargo_remote
-            .test(test, backtrace)
-            .await
-            .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?;
-
-        let result = CallToolResult::success(vec![Content::text(messages.join("\n\n"))]);
-        notify_resp(&self.context, &result, absolute_file).await;
-        Ok(result)
-    }
-
-    // --- symbol_docs ---
-    #[tool(
-        name = "symbol_docs",
-        description = "Get the documentation for a symbol"
-    )]
-    async fn symbol_docs(
-        &self,
-        #[tool(aggr)] args: CallToolRequestParam,
-    ) -> Result<CallToolResult, rmcp::Error> {
-        let file = args.get_file()?;
-        let (project, relative_file, absolute_file) =
-            match get_info_from_request(&self.context, &file).await {
+        let symbol_info =
+            match resolve_symbol_in_project(&project, &symbol_name, file_hint.as_deref()).await {
                 Ok(info) => info,
-                Err(e) => return Ok(error_response_v2(&e)),
+                Err(e) => return Ok(error_response(&e)),
             };
 
-        notify_req(&self.context, &args, absolute_file.clone()).await;
-
-        let line = args.get_line()?;
-        let symbol = args.get_symbol()?;
-        let position = find_symbol_position_in_file(&project, &relative_file, &symbol, line)
-            .await
-            .map_err(|e| rmcp::Error::invalid_params(e, None))?;
+        let file_path = symbol_info.location.uri.to_file_path().map_err(|_| {
+            rmcp::Error::internal_error("Invalid file path in symbol location", None)
+        })?;
 
         let hover = project
             .lsp
-            .hover(&relative_file, position)
+            .hover(&file_path, symbol_info.location.range.start)
             .await
-            .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?
-            .ok_or_else(|| rmcp::Error::internal_error("No hover information found", None))?;
+            .unwrap_or(None);
+        let documentation = hover.map_or_else(
+            || "No documentation found.".to_string(),
+            |h| match h.contents {
+                HoverContents::Scalar(s) => format_marked_string(&s),
+                HoverContents::Array(a) => a
+                    .into_iter()
+                    .map(|s| format_marked_string(&s))
+                    .collect::<Vec<_>>()
+                    .join("\n\n---\n\n"),
+                HoverContents::Markup(m) => m.value,
+            },
+        );
 
-        let response_text = match hover.contents {
-            HoverContents::Scalar(s) => format_marked_string(&s),
-            HoverContents::Array(a) => a
-                .into_iter()
-                .map(|s| format_marked_string(&s))
-                .collect::<Vec<_>>()
-                .join("\n"),
-            HoverContents::Markup(m) => m.value,
+        let definition_code = get_file_lines(
+            &file_path,
+            symbol_info.location.range.start.line,
+            symbol_info.location.range.end.line,
+            2,
+            5,
+        )
+        .unwrap_or(None)
+        .unwrap_or_else(|| "Could not read source file.".to_string());
+
+        let result_json = serde_json::json!({
+            "symbol": symbol_info.name,
+            "kind": format!("{:?}", symbol_info.kind),
+            "file_path": file_path.display().to_string(),
+            "position": {
+                "start_line": symbol_info.location.range.start.line,
+                "end_line": symbol_info.location.range.end.line,
+            },
+            "documentation": documentation,
+            "definition_code": definition_code,
+        });
+
+        let result = CallToolResult::success(vec![Content::json(result_json)?]);
+        notify_resp(&self.context, &result, project_path).await;
+        Ok(result)
+    }
+
+    #[tool(
+        name = "find_symbol_usages",
+        description = "Find all usages of a symbol across the entire project."
+    )]
+    async fn find_symbol_usages(
+        &self,
+        #[tool(param)] project_name: String,
+        #[tool(param)] symbol_name: String,
+        #[tool(param)] file_hint: Option<String>,
+    ) -> Result<CallToolResult, rmcp::Error> {
+        let Some(project_path) = self.context.find_project_by_name(&project_name).await else {
+            return Ok(error_response(&format!(
+                "Project '{}' not found.",
+                project_name
+            )));
         };
+        let project = self.context.get_project(&project_path).await.unwrap();
 
-        let result = CallToolResult::success(vec![Content::text(response_text)]);
-        notify_resp(&self.context, &result, absolute_file).await;
-        Ok(result)
-    }
-
-    // --- symbol_impl ---
-    #[tool(
-        name = "symbol_impl",
-        description = "Get the implementation for a symbol. If the implementation is in multiple files, will return multiple files. Will return the full file that contains the implementation including other contents of the file."
-    )]
-    async fn symbol_impl(
-        &self,
-        #[tool(aggr)] args: CallToolRequestParam,
-    ) -> Result<CallToolResult, rmcp::Error> {
-        let file = args.get_file()?;
-        let (project, relative_file, absolute_file) =
-            match get_info_from_request(&self.context, &file).await {
+        let symbol_info =
+            match resolve_symbol_in_project(&project, &symbol_name, file_hint.as_deref()).await {
                 Ok(info) => info,
-                Err(e) => return Ok(error_response_v2(&e)),
+                Err(e) => return Ok(error_response(&e)),
             };
-        notify_req(&self.context, &args, absolute_file.clone()).await;
 
-        let line = args.get_line()?;
-        let symbol = args.get_symbol()?;
-        let position = find_symbol_position_in_file(&project, &relative_file, &symbol, line)
-            .await
-            .map_err(|e| rmcp::Error::invalid_params(e, None))?;
-
-        let type_definition = project
-            .lsp
-            .type_definition(&relative_file, position)
-            .await
-            .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?
-            .ok_or_else(|| rmcp::Error::internal_error("No type definition found", None))?;
-
-        let contents = get_location_contents(type_definition)
-            .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?
-            .iter()
-            .map(|(content, path)| format!("## {}\n```rust\n{}\n```", path.display(), content))
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        let result = CallToolResult::success(vec![Content::text(contents)]);
-        notify_resp(&self.context, &result, absolute_file).await;
-        Ok(result)
-    }
-
-    // --- symbol_references ---
-    #[tool(
-        name = "symbol_references",
-        description = "Get all the references for a symbol. Will return a list of files that contain the symbol including a preview of the usage."
-    )]
-    async fn symbol_references(
-        &self,
-        #[tool(aggr)] args: CallToolRequestParam,
-    ) -> Result<CallToolResult, rmcp::Error> {
-        let file = args.get_file()?;
-        let (project, relative_file, absolute_file) =
-            match get_info_from_request(&self.context, &file).await {
-                Ok(info) => info,
-                Err(e) => return Ok(error_response_v2(&e)),
-            };
-        notify_req(&self.context, &args, absolute_file.clone()).await;
-
-        let line = args.get_line()?;
-        let symbol = args.get_symbol()?;
-        let position = find_symbol_position_in_file(&project, &relative_file, &symbol, line)
-            .await
-            .map_err(|e| rmcp::Error::invalid_params(e, None))?;
+        let symbol_file_path = symbol_info.location.uri.to_file_path().map_err(|_| {
+            rmcp::Error::internal_error("Invalid file path in symbol location", None)
+        })?;
 
         let references = project
             .lsp
-            .find_references(&relative_file, position)
+            .find_references(&symbol_file_path, symbol_info.location.range.start)
             .await
             .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?
             .ok_or_else(|| rmcp::Error::internal_error("No references found", None))?;
 
-        let mut contents = String::new();
-        for reference in references {
-            let Ok(Some(lines)) = get_file_lines(
-                reference.uri.path(),
-                reference.range.start.line,
-                reference.range.end.line,
-                4,
-                4,
-            ) else {
-                continue;
-            };
-            contents.push_str(&format!("## {}\n```rust\n{}\n```\n", reference.uri, lines));
-        }
+        let messages = references
+            .into_iter()
+            .filter_map(|reference| {
+                let Ok(ref_path) = reference.uri.to_file_path() else {
+                    return None;
+                };
+                let Ok(Some(lines)) = get_file_lines(
+                    &ref_path,
+                    reference.range.start.line,
+                    reference.range.end.line,
+                    3,
+                    3,
+                ) else {
+                    return None;
+                };
+                Some(Content::text(format!(
+                    "### {}\n(Line: {})\n```rust\n{}\n```",
+                    ref_path.display(),
+                    reference.range.start.line + 1,
+                    lines
+                )))
+            })
+            .collect::<Vec<Content>>();
 
-        let result = CallToolResult::success(vec![Content::text(contents)]);
-        notify_resp(&self.context, &result, absolute_file).await;
+        let result = if messages.is_empty() {
+            CallToolResult::success(vec![Content::text("No usages found.".to_string())])
+        } else {
+            CallToolResult::success(messages)
+        };
+
+        notify_resp(&self.context, &result, project_path).await;
         Ok(result)
     }
 
-    // --- symbol_resolve ---
+    // --- Project Health ---
     #[tool(
-        name = "symbol_resolve",
-        description = "Resolve a symbol based on its name. Provide any symbol from the file and it will try to resolve it and return documentation about it."
+        name = "check_project",
+        description = "Runs `cargo check` and returns a human-readable list of errors and warnings. For programmatic access to fixes, use the more powerful `get_diagnostics_with_fixes` tool."
     )]
-    async fn symbol_resolve(
+    async fn check_project(
         &self,
-        #[tool(aggr)] args: CallToolRequestParam,
+        #[tool(param)] project_name: String,
     ) -> Result<CallToolResult, rmcp::Error> {
-        let file = args.get_file()?;
-        let (project, relative_file, absolute_file) =
-            match get_info_from_request(&self.context, &file).await {
-                Ok(info) => info,
-                Err(e) => return Ok(error_response_v2(&e)),
-            };
-        notify_req(&self.context, &args, absolute_file.clone()).await;
+        let Some(project_path) = self.context.find_project_by_name(&project_name).await else {
+            return Ok(error_response(&format!(
+                "Project '{}' not found.",
+                project_name
+            )));
+        };
+        let project = self.context.get_project(&project_path).await.unwrap();
 
-        let symbol = args.get_symbol()?;
-        let symbols = project
-            .lsp
-            .document_symbols(&relative_file)
+        let rendered_messages = project
+            .cargo_remote
+            .check_rendered()
             .await
-            .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?
-            .ok_or_else(|| rmcp::Error::internal_error("No symbols found", None))?;
+            .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?;
 
-        let mut symbol_map = HashMap::new();
-        for file_symbol in symbols {
-            symbol_map.insert(file_symbol.name.clone(), file_symbol);
+        if rendered_messages.is_empty() {
+            return Ok(CallToolResult::success(vec![Content::text(
+                "Project check passed. No errors or warnings.".to_string(),
+            )]));
         }
 
-        let keys = symbol_map.keys().map(|s| s.as_str()).collect::<Vec<_>>();
-        let Some(best_match) = get_top_n(&symbol, &keys, None, Some(1), None, None)
-            .into_iter()
-            .next()
-        else {
-            return Err(rmcp::Error::internal_error(
-                "No match for symbol found",
-                None,
-            ));
-        };
+        let result =
+            CallToolResult::success(rendered_messages.into_iter().map(Content::text).collect());
+        notify_resp(&self.context, &result, project_path).await;
+        Ok(result)
+    }
 
-        let Some(symbol_match) = symbol_map.get(&best_match.to_string()) else {
-            return Err(rmcp::Error::internal_error(
-                "No match for symbol found",
-                None,
-            ));
+    #[tool(
+        name = "get_diagnostics_with_fixes",
+        description = "Checks the project for errors/warnings and automatically finds available quick fixes for each. This is the primary tool for identifying and fixing problems."
+    )]
+    async fn get_diagnostics_with_fixes(
+        &self,
+        #[tool(param)] project_name: String,
+    ) -> Result<CallToolResult, rmcp::Error> {
+        let Some(project_path) = self.context.find_project_by_name(&project_name).await else {
+            return Ok(error_response(&format!(
+                "Project '{}' not found.",
+                project_name
+            )));
         };
+        let project = self.context.get_project(&project_path).await.unwrap();
 
-        let position = symbol_match.location.range.start;
-        let hover = project
-            .lsp
-            .hover(&relative_file, position)
+        let diagnostics = project
+            .cargo_remote
+            .check_structured()
+            .await
+            .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?;
+
+        if diagnostics.is_empty() {
+            return Ok(CallToolResult::success(vec![Content::text(
+                "Project check passed. No diagnostics found.".to_string(),
+            )]));
+        }
+
+        let mut results = Vec::new();
+
+        for diag in diagnostics {
+            if let Some(span) = diag.spans.iter().find(|s| s.is_primary) {
+                let absolute_path = project.project.root().join(&span.file_name);
+                let range = lsp_types::Range {
+                    start: lsp_types::Position {
+                        line: span.line_start.saturating_sub(1) as u32,
+                        character: span.column_start.saturating_sub(1) as u32,
+                    },
+                    end: lsp_types::Position {
+                        line: span.line_end.saturating_sub(1) as u32,
+                        character: span.column_end.saturating_sub(1) as u32,
+                    },
+                };
+
+                let available_fixes = if let Ok(Some(actions)) =
+                    project.lsp.code_actions(&absolute_path, range).await
+                {
+                    actions
+                        .into_iter()
+                        .filter_map(|action_or_cmd| {
+                            if let lsp_types::CodeActionOrCommand::CodeAction(action) =
+                                action_or_cmd
+                            {
+                                Some(Fix {
+                                    title: action.title,
+                                    kind: action.kind,
+                                    edit_to_apply: action.edit,
+                                })
+                            } else {
+                                None
+                            }
+                        })
+                        .collect()
+                } else {
+                    vec![]
+                };
+
+                results.push(DiagnosticWithFixes {
+                    file_path: span.file_name.clone(),
+                    severity: diag.level.clone(),
+                    message: diag.rendered.clone(),
+                    line: span.line_start,
+                    character: span.column_start,
+                    available_fixes,
+                });
+            }
+        }
+
+        let result_json = serde_json::to_value(results).map_err(|e| {
+            rmcp::Error::internal_error(format!("Failed to serialize results: {}", e), None)
+        })?;
+
+        let result = CallToolResult::success(vec![Content::json(result_json)?]);
+        notify_resp(&self.context, &result, project_path).await;
+        Ok(result)
+    }
+
+    #[tool(
+        name = "apply_workspace_edit",
+        description = "Applies a `WorkspaceEdit` JSON object to the workspace. This is the final step for code modification tools like `rename_symbol` or `get_diagnostics_with_fixes`."
+    )]
+    async fn apply_workspace_edit(
+        &self,
+        #[tool(param)]
+        #[schemars(description = "A JSON object representing the LSP `WorkspaceEdit` to apply.")]
+        edit: serde_json::Value,
+    ) -> Result<CallToolResult, rmcp::Error> {
+        let workspace_edit: WorkspaceEdit = serde_json::from_value(edit.clone()).map_err(|e| {
+            rmcp::Error::invalid_params(format!("Invalid WorkspaceEdit JSON: {}", e), Some(edit))
+        })?;
+
+        match apply_workspace_edit(&workspace_edit) {
+            Ok(_) => Ok(CallToolResult::success(vec![Content::text(
+                "Workspace edit applied successfully.".to_string(),
+            )])),
+            Err(e) => Ok(error_response(&format!(
+                "Failed to apply workspace edit: {}",
+                e
+            ))),
+        }
+    }
+
+    #[tool(
+        name = "rename_symbol",
+        description = "Prepares a `WorkspaceEdit` for renaming a symbol across the entire project. The returned edit must be applied with `apply_workspace_edit`."
+    )]
+    async fn rename_symbol(
+        &self,
+        #[tool(param)] project_name: String,
+        #[tool(param)] file_path: String,
+        #[tool(param)] line: u32,
+        #[tool(param)] character: u32,
+        #[tool(param)] new_name: String,
+    ) -> Result<CallToolResult, rmcp::Error> {
+        let Some(project_path) = self.context.find_project_by_name(&project_name).await else {
+            return Ok(error_response(&format!(
+                "Project '{}' not found.",
+                project_name
+            )));
+        };
+        let project = self.context.get_project(&project_path).await.unwrap();
+        let absolute_path = project.project.root().join(&file_path);
+        let position = lsp_types::Position { line, character };
+
+        let edit = project.lsp.rename(&absolute_path, position, new_name).await
+            .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?
+            .ok_or_else(|| rmcp::Error::internal_error("Could not perform rename operation. The symbol at the given location may not be renameable.", None))?;
+
+        let result_json = serde_json::json!({
+            "description": "WorkspaceEdit to perform the rename operation. Apply this with the `apply_workspace_edit` tool.",
+            "edit_to_apply": edit,
+        });
+
+        let result = CallToolResult::success(vec![Content::json(result_json)?]);
+        notify_resp(&self.context, &result, project_path).await;
+        Ok(result)
+    }
+
+    #[tool(
+        name = "test_project",
+        description = "Runs `cargo test` on a project. Can run all tests or a specific one."
+    )]
+    async fn test_project(
+        &self,
+        #[tool(param)] project_name: String,
+        #[tool(param)] test_name: Option<String>,
+        #[tool(param)] backtrace: Option<bool>,
+    ) -> Result<CallToolResult, rmcp::Error> {
+        let Some(project_path) = self.context.find_project_by_name(&project_name).await else {
+            return Ok(error_response(&format!(
+                "Project '{}' not found.",
+                project_name
+            )));
+        };
+        let project = self.context.get_project(&project_path).await.unwrap();
+
+        let messages = project
+            .cargo_remote
+            .test(test_name, backtrace.unwrap_or(false))
             .await
             .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?
-            .ok_or_else(|| rmcp::Error::internal_error("No hover information found", None))?;
+            .into_iter()
+            .map(Content::text)
+            .collect::<Vec<Content>>();
 
-        let response_text = match hover.contents {
-            HoverContents::Scalar(s) => format_marked_string(&s),
-            HoverContents::Array(a) => a
-                .into_iter()
-                .map(|s| format_marked_string(&s))
-                .collect::<Vec<_>>()
-                .join("\n"),
-            HoverContents::Markup(m) => m.value,
-        };
-
-        let result = CallToolResult::success(vec![Content::text(response_text)]);
-        notify_resp(&self.context, &result, absolute_file).await;
+        let result = CallToolResult::success(messages);
+        notify_resp(&self.context, &result, project_path).await;
         Ok(result)
     }
 }
@@ -453,7 +537,7 @@ impl ServerHandler for DevToolsServer {
             protocol_version: ProtocolVersion::default(),
             server_info: Implementation {
                 name: "rust-devtools-mcp".to_string(),
-                version: "0.1.0".to_string(),
+                version: "0.3.0-smart-diagnostics".to_string(),
             },
             instructions: Some(GUIDANCE_PROMPT.to_string()),
             ..Default::default()
@@ -463,13 +547,13 @@ impl ServerHandler for DevToolsServer {
     fn list_prompts(
         &self,
         _request: Option<PaginatedRequestParam>,
-        _context: RequestContext<RoleServer>,
+        _context: RmcpRequestContext<RoleServer>,
     ) -> impl std::future::Future<Output = Result<ListPromptsResult, rmcp::Error>> + Send + '_ {
         std::future::ready(Ok(ListPromptsResult {
             prompts: vec![Prompt {
                 name: "rust_development_guidance".to_string(),
                 description: Some(
-                    "Comprehensive guidance for Rust development using rust-devtools-mcp"
+                    "Comprehensive guidance for Rust development using the refactored rust-devtools-mcp"
                         .to_string(),
                 ),
                 arguments: None,
@@ -481,12 +565,13 @@ impl ServerHandler for DevToolsServer {
     fn get_prompt(
         &self,
         request: GetPromptRequestParam,
-        _context: RequestContext<RoleServer>,
+        _context: RmcpRequestContext<RoleServer>,
     ) -> impl std::future::Future<Output = Result<GetPromptResult, rmcp::Error>> + Send + '_ {
         match request.name.as_str() {
             "rust_development_guidance" => std::future::ready(Ok(GetPromptResult {
                 description: Some(
-                    "Guidance for using Rust development tools effectively".to_string(),
+                    "Guidance for using the refactored Rust development tools effectively"
+                        .to_string(),
                 ),
                 messages: vec![PromptMessage {
                     role: PromptMessageRole::User,
