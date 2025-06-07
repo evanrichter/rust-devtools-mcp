@@ -60,13 +60,18 @@ fn handle_config_change(result: DebounceEventResult, context: Arc<RwLock<Context
             for event in events {
                 if should_reload_config(&event, &context)? {
                     info!("Detected config file change, starting hot reload...");
-                    tokio::spawn(async move {
-                        if let Err(e) = reload_config(context).await {
-                            error!("Config hot reload failed: {}", e);
-                        } else {
-                            info!("Config hot reload completed successfully");
-                        }
-                    });
+                    // Use Handle::current() to spawn from a non-async context
+                    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                        handle.spawn(async move {
+                            if let Err(e) = reload_config(context).await {
+                                error!("Config hot reload failed: {}", e);
+                            } else {
+                                info!("Config hot reload completed successfully");
+                            }
+                        });
+                    } else {
+                        error!("No Tokio runtime available for config reload");
+                    }
                     break; // Only need to handle one reload
                 }
             }
