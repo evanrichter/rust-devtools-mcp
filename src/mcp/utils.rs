@@ -4,7 +4,8 @@ use std::sync::Arc;
 
 use crate::context::ProjectContext;
 use anyhow::Result;
-use lsp_types::{Position, TextEdit, WorkspaceEdit};
+use lsp_types::{Position, Range, TextEdit, WorkspaceEdit};
+use std::collections::HashMap;
 use rmcp::model::{CallToolResult, Content};
 
 pub fn error_response(message: &str) -> CallToolResult {
@@ -199,4 +200,245 @@ fn apply_edits_to_file(path: &PathBuf, edits: &[TextEdit]) -> std::io::Result<()
 
     fs::write(path, content)?;
     Ok(())
+}
+
+// Smart target location finder using identifier and context
+pub fn find_target_location(
+    content: &str,
+    target_identifier: &str,
+    context_hint: Option<&str>,
+    threshold: f64,
+) -> Result<Option<(usize, usize, String)>, String> {
+    let content_lines: Vec<&str> = content.lines().collect();
+    let mut candidates: Vec<(usize, usize, String, f64)> = Vec::new();
+    
+    // Strategy 1: Find exact identifier matches
+    for (line_idx, line) in content_lines.iter().enumerate() {
+        if line.contains(target_identifier) {
+            // Try to determine the scope of this identifier (function, struct, etc.)
+            let (start_line, end_line) = determine_code_scope(&content_lines, line_idx);
+            let scope_text = content_lines[start_line..=end_line].join("\n");
+            
+            let mut score = 0.8; // Base score for exact identifier match
+            
+            // Boost score if context hint matches
+            if let Some(hint) = context_hint {
+                if scope_text.contains(hint) {
+                    score += 0.15;
+                }
+            }
+            
+            let start_byte = line_to_byte_offset(content, start_line);
+            let end_byte = line_to_byte_offset(content, end_line + 1);
+            candidates.push((start_byte, end_byte, scope_text, score));
+        }
+    }
+    
+    // Strategy 2: If no exact matches, try fuzzy matching on identifier
+    if candidates.is_empty() {
+        for (line_idx, line) in content_lines.iter().enumerate() {
+            let line_similarity = calculate_similarity(target_identifier, line);
+            if line_similarity >= threshold * 0.7 { // Lower threshold for fuzzy matching
+                let (start_line, end_line) = determine_code_scope(&content_lines, line_idx);
+                let scope_text = content_lines[start_line..=end_line].join("\n");
+                
+                let mut score = line_similarity * 0.6; // Lower base score for fuzzy match
+                
+                if let Some(hint) = context_hint {
+                    if scope_text.contains(hint) {
+                        score += 0.2;
+                    }
+                }
+                
+                let start_byte = line_to_byte_offset(content, start_line);
+                let end_byte = line_to_byte_offset(content, end_line + 1);
+                candidates.push((start_byte, end_byte, scope_text, score));
+            }
+        }
+    }
+    
+    // Return the best candidate that meets the threshold
+    candidates.sort_by(|a, b| b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal));
+    
+    if let Some((start, end, text, score)) = candidates.first() {
+        if *score >= threshold {
+            return Ok(Some((*start, *end, text.clone())));
+        }
+    }
+    
+    Ok(None)
+}
+
+// Determine the scope of code around a given line (function, struct, impl block, etc.)
+fn determine_code_scope(lines: &[&str], target_line: usize) -> (usize, usize) {
+    let mut start_line = target_line;
+    let mut brace_count = 0;
+    let mut found_opening = false;
+    
+    // Look backwards for the start of the scope
+    for i in (0..=target_line).rev() {
+        let line = lines[i].trim();
+        
+        // Count braces
+        for ch in line.chars().rev() {
+            match ch {
+                '}' => brace_count += 1,
+                '{' => {
+                    brace_count -= 1;
+                    if brace_count < 0 {
+                        found_opening = true;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        
+        // Check for function/struct/impl declarations
+        if line.starts_with("fn ") || line.starts_with("struct ") || 
+           line.starts_with("impl ") || line.starts_with("enum ") ||
+           line.starts_with("trait ") || line.contains(" fn ") {
+            start_line = i;
+            break;
+        }
+        
+        if found_opening {
+            start_line = i;
+            break;
+        }
+    }
+    
+    // Reset and look forwards for the end of the scope
+    brace_count = 0;
+    found_opening = false;
+    
+    for i in target_line..lines.len() {
+        let line = lines[i].trim();
+        
+        // Count braces
+        for ch in line.chars() {
+            match ch {
+                '{' => {
+                    brace_count += 1;
+                    found_opening = true;
+                }
+                '}' => {
+                    brace_count -= 1;
+                    if found_opening && brace_count == 0 {
+                        return (start_line, i);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    
+    // If no clear scope found, return a reasonable range around the target
+    let start = target_line.saturating_sub(2);
+    let end = (target_line + 2).min(lines.len().saturating_sub(1));
+    (start, end)
+}
+
+// Helper function to calculate similarity between two strings
+fn calculate_similarity(a: &str, b: &str) -> f64 {
+    let a_words: std::collections::HashSet<&str> = a.split_whitespace().collect();
+    let b_words: std::collections::HashSet<&str> = b.split_whitespace().collect();
+    
+    if a_words.is_empty() && b_words.is_empty() {
+        return 1.0;
+    }
+    
+    let intersection = a_words.intersection(&b_words).count();
+    let union = a_words.union(&b_words).count();
+    
+    intersection as f64 / union as f64
+}
+
+// Helper function to convert line number to byte offset
+fn line_to_byte_offset(content: &str, line: usize) -> usize {
+    content.lines().take(line).map(|l| l.len() + 1).sum()
+}
+
+// Helper function to convert byte positions to LSP positions
+pub fn byte_positions_to_lsp_positions(content: &str, start_byte: usize, end_byte: usize) -> (Position, Position) {
+    let lines_before_start = content[..start_byte].lines().count();
+    let start_line = if start_byte == 0 { 0 } else { lines_before_start };
+    let start_char = if start_line == 0 {
+        start_byte
+    } else {
+        start_byte - content[..start_byte].rfind('\n').unwrap_or(0) - 1
+    };
+    
+    let lines_before_end = content[..end_byte].lines().count();
+    let end_line = if end_byte == 0 { 0 } else { lines_before_end };
+    let end_char = if end_line == 0 {
+        end_byte
+    } else {
+        end_byte - content[..end_byte].rfind('\n').unwrap_or(0) - 1
+    };
+
+    let start_pos = Position {
+        line: start_line as u32,
+        character: start_char as u32,
+    };
+    let end_pos = Position {
+        line: end_line as u32,
+        character: end_char as u32,
+    };
+    
+    (start_pos, end_pos)
+}
+
+// Convert simple edits to workspace edit using smart targeting
+pub fn convert_simple_edits_to_workspace_edit(
+    edits: &[crate::mcp::server::SimpleFileEdit],
+) -> Result<WorkspaceEdit, String> {
+    let mut changes: HashMap<lsp_types::Url, Vec<TextEdit>> = HashMap::new();
+
+    for edit in edits {
+        // Read file content
+        let content = std::fs::read_to_string(&edit.file_path)
+            .map_err(|e| format!("Failed to read file {}: {}", edit.file_path, e))?;
+
+        // Use smart targeting based on identifier and context
+        let match_result = find_target_location(
+            &content,
+            &edit.target_identifier,
+            edit.context_hint.as_deref(),
+            edit.similarity_threshold,
+        )?;
+        
+        if let Some((start_byte, end_byte, _matched_text)) = match_result {
+            // Convert byte positions to LSP positions
+            let (start_pos, end_pos) = byte_positions_to_lsp_positions(&content, start_byte, end_byte);
+
+            let range = Range {
+                start: start_pos,
+                end: end_pos,
+            };
+
+            let text_edit = TextEdit {
+                range,
+                new_text: edit.new_content.clone(),
+            };
+
+            // Convert file path to URI
+            let uri = lsp_types::Url::from_file_path(&edit.file_path).map_err(|_| {
+                format!("Invalid file path: {}", edit.file_path)
+            })?;
+
+            changes.entry(uri).or_insert_with(Vec::new).push(text_edit);
+        } else {
+            return Err(format!(
+                "No suitable match found for target '{}' (similarity threshold: {})", 
+                edit.target_identifier, edit.similarity_threshold
+            ));
+        }
+    }
+
+    Ok(WorkspaceEdit {
+        changes: Some(changes),
+        document_changes: None,
+        change_annotations: None,
+    })
 }

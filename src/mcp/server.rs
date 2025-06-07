@@ -2,14 +2,14 @@ use crate::context::Context as AppContext;
 use crate::lsp::format_marked_string;
 use crate::mcp::McpNotification;
 use crate::mcp::utils::{
-    apply_workspace_edit, error_response, get_file_lines, resolve_symbol_in_project,
+    apply_workspace_edit, convert_simple_edits_to_workspace_edit, error_response, get_file_lines, resolve_symbol_in_project,
 };
 use lsp_types::{HoverContents, WorkspaceEdit};
 use rmcp::{
     ServerHandler, model::*, schemars, service::RequestContext as RmcpRequestContext,
     service::RoleServer, tool,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 const GUIDANCE_PROMPT: &str = include_str!("guidance_prompt.md");
@@ -23,7 +23,22 @@ impl DevToolsServer {
     pub fn new(context: AppContext) -> Self {
         Self { context }
     }
-}
+
+    fn convert_simple_edits_to_workspace_edit(
+        &self,
+        edits: Vec<SimpleFileEdit>,
+    ) -> Result<WorkspaceEdit, rmcp::Error> {
+        convert_simple_edits_to_workspace_edit(&edits).map_err(|e| {
+            rmcp::Error::invalid_params(
+                format!("Failed to convert edits: {}", e),
+                None
+            )
+        })
+    }
+    
+    // Smart target location finder using identifier and context
+
+ }
 
 async fn notify_resp(ctx: &AppContext, resp: &CallToolResult, project_path: PathBuf) {
     let _ = ctx
@@ -49,6 +64,26 @@ struct DiagnosticWithFixes {
     line: usize,
     character: usize,
     available_fixes: Vec<Fix>,
+}
+
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
+pub struct SimpleFileEdit {
+    #[schemars(description = "The absolute file path to edit.")]
+    pub file_path: String,
+    #[schemars(description = "A unique identifier for the target code segment (e.g., function name, struct name, or a distinctive code pattern). This is used for intelligent location matching.")]
+    pub target_identifier: String,
+    #[schemars(description = "Optional context hint to improve target location accuracy (e.g., 'inside impl block', 'after use statements', or surrounding code patterns).")]
+    #[serde(default)]
+    pub context_hint: Option<String>,
+    #[schemars(description = "The new content to replace the identified target with.")]
+    pub new_content: String,
+    #[schemars(description = "Similarity threshold for fuzzy matching (0.0 to 1.0). Higher values require more precise matches. Default: 0.8")]
+    #[serde(default = "default_similarity_threshold")]
+    pub similarity_threshold: f64,
+}
+
+fn default_similarity_threshold() -> f64 {
+    0.7
 }
 
 #[tool(tool_box)]
@@ -178,9 +213,15 @@ impl DevToolsServer {
     )]
     async fn get_symbol_info(
         &self,
-        #[tool(param)] project_name: String,
-        #[tool(param)] symbol_name: String,
-        #[tool(param)] file_hint: Option<String>,
+        #[tool(param)]
+        #[schemars(description = "The name of the project to search in.")]
+        project_name: String,
+        #[tool(param)]
+        #[schemars(description = "The name of the symbol to get information for.")]
+        symbol_name: String,
+        #[tool(param)]
+        #[schemars(description = "Optional file path hint to help locate the symbol more efficiently.")]
+        file_hint: Option<String>,
     ) -> Result<CallToolResult, rmcp::Error> {
         let Some(project_path) = self.context.find_project_by_name(&project_name).await else {
             return Ok(error_response(&format!(
@@ -251,9 +292,15 @@ impl DevToolsServer {
     )]
     async fn find_symbol_usages(
         &self,
-        #[tool(param)] project_name: String,
-        #[tool(param)] symbol_name: String,
-        #[tool(param)] file_hint: Option<String>,
+        #[tool(param)]
+        #[schemars(description = "The name of the project to search in.")]
+        project_name: String,
+        #[tool(param)]
+        #[schemars(description = "The name of the symbol to find usages for.")]
+        symbol_name: String,
+        #[tool(param)]
+        #[schemars(description = "Optional file path hint to help locate the symbol more efficiently.")]
+        file_hint: Option<String>,
     ) -> Result<CallToolResult, rmcp::Error> {
         let Some(project_path) = self.context.find_project_by_name(&project_name).await else {
             return Ok(error_response(&format!(
@@ -321,7 +368,9 @@ impl DevToolsServer {
     )]
     async fn check_project(
         &self,
-        #[tool(param)] project_name: String,
+        #[tool(param)]
+        #[schemars(description = "The name of the project to check for errors and warnings.")]
+        project_name: String,
     ) -> Result<CallToolResult, rmcp::Error> {
         let Some(project_path) = self.context.find_project_by_name(&project_name).await else {
             return Ok(error_response(&format!(
@@ -355,7 +404,9 @@ impl DevToolsServer {
     )]
     async fn get_diagnostics_with_fixes(
         &self,
-        #[tool(param)] project_name: String,
+        #[tool(param)]
+        #[schemars(description = "The name of the project to get diagnostics and fixes for.")]
+        project_name: String,
     ) -> Result<CallToolResult, rmcp::Error> {
         let Some(project_path) = self.context.find_project_by_name(&project_name).await else {
             return Ok(error_response(&format!(
@@ -438,24 +489,24 @@ impl DevToolsServer {
 
     #[tool(
         name = "apply_workspace_edit",
-        description = "Applies a `WorkspaceEdit` JSON object to the workspace. This is the final step for code modification tools like `rename_symbol` or `get_diagnostics_with_fixes`."
+        description = "Applies file edits to the workspace using intelligent text matching. Supports both exact and fuzzy matching - you don't need to provide perfect text, the system will find the most similar content. Adjust similarity_threshold for more or less strict matching (default 0.7)."
     )]
     async fn apply_workspace_edit(
         &self,
         #[tool(param)]
-        #[schemars(description = "A JSON object representing the LSP `WorkspaceEdit` to apply.")]
-        edit: serde_json::Value,
+        #[schemars(description = "Array of file edits to apply using smart target location. Each edit uses a target identifier and optional context hint to intelligently locate and replace code sections, eliminating the need for precise line numbers or exact text matching.")]
+        edits: Vec<SimpleFileEdit>,
     ) -> Result<CallToolResult, rmcp::Error> {
-        let workspace_edit: WorkspaceEdit = serde_json::from_value(edit.clone()).map_err(|e| {
-            rmcp::Error::invalid_params(format!("Invalid WorkspaceEdit JSON: {}", e), Some(edit))
-        })?;
+        // Convert simple edits to LSP WorkspaceEdit
+        let workspace_edit = self.convert_simple_edits_to_workspace_edit(edits)?;
 
+        // Use the existing apply_workspace_edit function from utils
         match apply_workspace_edit(&workspace_edit) {
             Ok(_) => Ok(CallToolResult::success(vec![Content::text(
-                "Workspace edit applied successfully.".to_string(),
+                "File edits applied successfully.".to_string(),
             )])),
             Err(e) => Ok(error_response(&format!(
-                "Failed to apply workspace edit: {}",
+                "Failed to apply file edits: {}",
                 e
             ))),
         }
@@ -467,11 +518,21 @@ impl DevToolsServer {
     )]
     async fn rename_symbol(
         &self,
-        #[tool(param)] project_name: String,
-        #[tool(param)] file_path: String,
-        #[tool(param)] line: u32,
-        #[tool(param)] character: u32,
-        #[tool(param)] new_name: String,
+        #[tool(param)]
+        #[schemars(description = "The name of the project containing the symbol to rename.")]
+        project_name: String,
+        #[tool(param)]
+        #[schemars(description = "The relative file path within the project where the symbol is located.")]
+        file_path: String,
+        #[tool(param)]
+        #[schemars(description = "The line number (0-based) where the symbol is located.")]
+        line: u32,
+        #[tool(param)]
+        #[schemars(description = "The character position (0-based) on the line where the symbol is located.")]
+        character: u32,
+        #[tool(param)]
+        #[schemars(description = "The new name for the symbol.")]
+        new_name: String,
     ) -> Result<CallToolResult, rmcp::Error> {
         let Some(project_path) = self.context.find_project_by_name(&project_name).await else {
             return Ok(error_response(&format!(
@@ -503,9 +564,15 @@ impl DevToolsServer {
     )]
     async fn test_project(
         &self,
-        #[tool(param)] project_name: String,
-        #[tool(param)] test_name: Option<String>,
-        #[tool(param)] backtrace: Option<bool>,
+        #[tool(param)]
+        #[schemars(description = "The name of the project to run tests for.")]
+        project_name: String,
+        #[tool(param)]
+        #[schemars(description = "Optional specific test name to run. If not provided, all tests will be run.")]
+        test_name: Option<String>,
+        #[tool(param)]
+        #[schemars(description = "Whether to enable backtrace for test failures. Defaults to false.")]
+        backtrace: Option<bool>,
     ) -> Result<CallToolResult, rmcp::Error> {
         let Some(project_path) = self.context.find_project_by_name(&project_name).await else {
             return Ok(error_response(&format!(
