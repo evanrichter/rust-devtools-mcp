@@ -19,7 +19,7 @@ flume = "0.11"
 # - No join functionality for URIs
 lsp-types = "0.95.1"
 axum = "0.8"
-rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk", rev = "db03f63", features = [
+rmcp = { git = "https://github.com/evanrichter/rust-sdk", rev = "8952e989142bdb8460c3f713c3f52d839fa40639", features = [
     "server",
     "transport-sse-server",
     "transport-io",
